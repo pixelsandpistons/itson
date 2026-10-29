@@ -12,6 +12,7 @@ repository.workspace = true
 itson-protocol.workspace = true
 itson-domain.workspace = true
 ring.workspace = true
+rusqlite.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

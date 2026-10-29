@@ -28,10 +28,12 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
 - `crates/itson-domain`: permission resolution (owner, administrator, roles, channel overwrites in
   everyone/roles/member layers, timeouts), message and username normalisation, ID generator.
 - `crates/itson-server`: sans-I/O server core. `store.rs` has the `Store` trait and a `MemoryStore`;
+  `sqlite.rs` implements `SqliteStore` with bundled SQLite, WAL and versioned migrations
+  ([storage details](STORAGE.md)); shared conformance tests cover both stores.
   `password.rs` hashes with PBKDF2-HMAC-SHA256 in a self-describing format; `token.rs` makes session
   tokens and stores only their SHA-256; `service.rs` is every operation with permission checks
   (`Server<S: Store>`); `gateway.rs` is the per-connection state machine (`Connection`) and the
-  per-session event log with outbox (`Sessions`) that makes `resume` work. No network, no database.
+  per-session event log with outbox (`Sessions`) that makes `resume` work. No network adapter yet.
 - `crates/itson-client-core`: `ClientConnection`, the client's handshake/heartbeat/resume state machine.
 - `crates/itson-voice`: a jitter buffer with FEC-aware loss reporting.
 - `spikes/`: Phase 0 experiments (Opus over QUIC with certificate pinning; message lists in iced and
@@ -63,10 +65,8 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
 
 Each is self-contained and does not collide with the others.
 
-1. **SQLite `Store`.** Implement `itson_server::store::Store` with `rusqlite` (bundled SQLite, WAL
-   mode) in a new module or crate, with versioned schema migrations and the same behaviour as
-   `MemoryStore`. Write a conformance test that runs the existing store expectations against both
-   implementations. Propose the `rusqlite` version in the PR.
+1. **SQLite `Store` (implemented).** `SqliteStore` uses `rusqlite` =0.41.0 (bundled SQLite, WAL),
+   versioned migrations and shared conformance tests with `MemoryStore`. See [STORAGE.md](STORAGE.md).
 2. **HTTP and WebSocket adapter.** An `axum` server exposing `POST /api/setup`, `POST /api/sign-in`,
    `POST /api/register`, `GET /api/history`, and `GET /gateway` (WebSocket). The socket handler decodes
    `ClientFrame`, calls `Connection::handle`, sends `Output::Send`, closes on `Output::Close`, and drains

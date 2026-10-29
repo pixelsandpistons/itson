@@ -1,13 +1,14 @@
-//! The It's On server, without its network and database adapters.
+//! The It's On server core and SQLite storage adapter.
 //!
 //! Everything here is plain Rust driven by the caller: the HTTP and QUIC
-//! front ends and the SQLite store plug in from the outside. That keeps the
+//! front ends plug in from the outside. That keeps the
 //! rules testable with fictional data and lets the storage change later.
 //!
 //! Layering:
 //!
 //! - [`store`]: what is persisted and the [`store::Store`] trait, with an
 //!   in-memory implementation.
+//! - [`sqlite`]: the persistent store, with versioned schema migrations.
 //! - [`password`] and [`token`]: credential handling.
 //! - [`service`]: the operations a server offers, with permission checks.
 //! - [`gateway`]: the per-connection protocol state machine and the event
@@ -16,6 +17,7 @@
 pub mod gateway;
 pub mod password;
 pub mod service;
+pub mod sqlite;
 pub mod store;
 pub mod token;
 

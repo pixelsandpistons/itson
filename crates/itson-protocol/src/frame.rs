@@ -139,6 +139,9 @@ pub enum ServerFrame {
         user: User,
         channels: Vec<Channel>,
         roles: Vec<Role>,
+        /// Members online right now. Added in 0.2; absent from 0.1 servers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        presences: Vec<(UserId, Presence)>,
     },
     /// Reply to a successful `resume`. Replayed events follow, each with its
     /// original sequence number.

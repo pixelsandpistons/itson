@@ -7,8 +7,9 @@
 //! `authenticate` on its own.
 
 use itson_protocol::SessionToken;
+use itson_protocol::UserId;
 use itson_protocol::frame::{ClientFrame, ErrorCode, ServerEnvelope, ServerFrame};
-use itson_protocol::model::{Channel, Role, User};
+use itson_protocol::model::{Channel, Presence, Role, User};
 use itson_protocol::version::{ProtocolVersion, VersionRange};
 
 /// What the adapter or the UI should do next.
@@ -20,6 +21,7 @@ pub enum Action {
         user: User,
         channels: Vec<Channel>,
         roles: Vec<Role>,
+        presences: Vec<(UserId, Presence)>,
     },
     /// Back after a drop; `replayed` events follow as ordinary events.
     Resumed {
@@ -164,6 +166,7 @@ impl ClientConnection {
                     user,
                     channels,
                     roles,
+                    presences,
                 },
             ) => {
                 self.state = State::Ready;
@@ -173,6 +176,7 @@ impl ClientConnection {
                     user,
                     channels,
                     roles,
+                    presences,
                 }]
             }
             (State::AwaitingReady, ServerFrame::Resumed { replayed }) => {

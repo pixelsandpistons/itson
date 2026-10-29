@@ -30,6 +30,7 @@ fn ready() -> ServerEnvelope {
         },
         channels: vec![],
         roles: vec![],
+        presences: vec![],
     })
 }
 

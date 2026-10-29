@@ -14,7 +14,7 @@ use crate::store::Store;
 use crate::token::TokenHash;
 use itson_protocol::frame::{ClientFrame, ErrorCode, ServerEnvelope, ServerFrame};
 use itson_protocol::limits::HEARTBEAT_INTERVAL_MS;
-use itson_protocol::model::User;
+use itson_protocol::model::{Presence, User};
 use itson_protocol::version::{ProtocolVersion, VersionRange, negotiate};
 use itson_protocol::{Permissions, SessionToken, UserId};
 use std::collections::{HashMap, VecDeque};
@@ -82,11 +82,13 @@ impl EventLog {
     }
 }
 
-/// Signed-in sessions, keyed by session token hash. One per server process;
-/// the socket adapter holds it behind a lock.
+/// Signed-in sessions, keyed by session token hash, and each online member's
+/// chosen presence. One per server process; the socket adapter holds it
+/// behind a lock.
 #[derive(Debug, Default)]
 pub struct Sessions {
     logs: HashMap<TokenHash, (UserId, EventLog)>,
+    presence: HashMap<UserId, Presence>,
 }
 
 impl Sessions {
@@ -98,12 +100,70 @@ impl Sessions {
         self.logs
             .entry(token_hash)
             .or_insert((user, EventLog::default()));
+        self.presence.entry(user).or_insert(Presence::Online);
     }
 
     /// Forgets a session's log. Call after the resume grace period, or when
-    /// the session is signed out.
-    pub fn close(&mut self, token_hash: &TokenHash) {
-        self.logs.remove(token_hash);
+    /// the session is signed out. Returns the member who went offline if this
+    /// was their last session; the adapter then calls
+    /// [`publish_offline`](Self::publish_offline).
+    pub fn close(&mut self, token_hash: &TokenHash) -> Option<UserId> {
+        let (user, _) = self.logs.remove(token_hash)?;
+        if self.logs.values().any(|(u, _)| *u == user) {
+            return None;
+        }
+        self.presence.remove(&user);
+        Some(user)
+    }
+
+    /// A member's presence as other members see it.
+    pub fn presence_of(&self, user: UserId) -> Presence {
+        self.presence
+            .get(&user)
+            .copied()
+            .unwrap_or(Presence::Offline)
+    }
+
+    /// Every online member and their presence, sorted by member, for `ready`.
+    pub fn presences(&self) -> Vec<(UserId, Presence)> {
+        let mut out: Vec<(UserId, Presence)> =
+            self.presence.iter().map(|(u, p)| (*u, *p)).collect();
+        out.sort_by_key(|(u, _)| *u);
+        out
+    }
+
+    /// Members with at least one open session, sorted.
+    pub fn online(&self) -> Vec<UserId> {
+        let mut out: Vec<UserId> = self.presence.keys().copied().collect();
+        out.sort();
+        out
+    }
+
+    /// Records a chosen presence and tells every online member when it
+    /// changed. Choosing `offline` hides the member while they stay connected.
+    pub fn set_presence(&mut self, user: UserId, presence: Presence) {
+        if self.presence.insert(user, presence) == Some(presence) {
+            return;
+        }
+        let everyone = self.online();
+        self.publish(
+            &everyone,
+            &ServerFrame::PresenceUpdated { user, presence },
+            None,
+        );
+    }
+
+    /// Tells every online member that `user` went offline.
+    pub fn publish_offline(&mut self, user: UserId) {
+        let everyone = self.online();
+        self.publish(
+            &everyone,
+            &ServerFrame::PresenceUpdated {
+                user,
+                presence: Presence::Offline,
+            },
+            None,
+        );
     }
 
     /// Stamps `frame` into every session of every member in `recipients`.
@@ -269,11 +329,14 @@ impl Connection {
                     Err(e) => vec![error(e, None)],
                 }
             }
-            // Reactions, read markers and presence land in a later increment.
+            ClientFrame::SetPresence { presence } => {
+                sessions.set_presence(actor, presence);
+                Vec::new()
+            }
+            // Reactions and read markers land with the next store migration.
             ClientFrame::AddReaction { .. }
             | ClientFrame::RemoveReaction { .. }
-            | ClientFrame::MarkRead { .. }
-            | ClientFrame::SetPresence { .. } => vec![error(ServiceError::NotFound, None)],
+            | ClientFrame::MarkRead { .. } => vec![error(ServiceError::NotFound, None)],
             ClientFrame::Hello { .. }
             | ClientFrame::Authenticate { .. }
             | ClientFrame::Resume { .. } => {
@@ -319,7 +382,24 @@ impl Connection {
         };
         let roles = server.roles().unwrap_or_default();
         let token_hash = TokenHash::of(token);
+        let newly_online = sessions.presence_of(user.id) == Presence::Offline;
         sessions.open(token_hash.clone(), user.id);
+        if newly_online {
+            let others: Vec<UserId> = sessions
+                .online()
+                .into_iter()
+                .filter(|u| *u != user.id)
+                .collect();
+            sessions.publish(
+                &others,
+                &ServerFrame::PresenceUpdated {
+                    user: user.id,
+                    presence: Presence::Online,
+                },
+                None,
+            );
+        }
+        let presences = sessions.presences();
         self.state = State::Ready {
             user: user.clone(),
             token_hash,
@@ -328,6 +408,7 @@ impl Connection {
             user,
             channels,
             roles,
+            presences,
         })]
     }
 

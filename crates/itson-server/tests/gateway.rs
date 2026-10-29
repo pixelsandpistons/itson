@@ -4,7 +4,7 @@
 
 use itson_domain::permissions::{Overwrite, OverwriteTarget};
 use itson_protocol::frame::{ClientFrame, ErrorCode, ServerFrame};
-use itson_protocol::model::ChannelKind;
+use itson_protocol::model::{ChannelKind, Presence};
 use itson_protocol::version::{ProtocolVersion, VersionRange};
 use itson_protocol::{ChannelId, MessageId, Permissions, RoleId, SessionToken, UserId};
 use itson_server::gateway::{Connection, Output, Sessions};
@@ -183,6 +183,8 @@ fn a_message_reaches_every_viewer_with_the_nonce_only_for_the_author() {
     let mut w = world();
     let (mut dan, dan_token) = sign_in(&mut w, "dan", "late-fees-forever");
     let (_cc, cc_token) = sign_in(&mut w, "couch_coop", "two-player-mode");
+    // Drop the presence announcement from the second sign-in.
+    w.sessions.drain(&TokenHash::of(&dan_token));
     let general = w.general;
 
     let out = dan.handle(
@@ -202,7 +204,8 @@ fn a_message_reaches_every_viewer_with_the_nonce_only_for_the_author() {
     let theirs = w.sessions.drain(&TokenHash::of(&cc_token));
     assert_eq!(mine.len(), 1);
     assert_eq!(theirs.len(), 1);
-    assert_eq!(mine[0].s, Some(1));
+    // Dan's sequence 1 was the presence announcement drained above.
+    assert_eq!(mine[0].s, Some(2));
     assert_eq!(theirs[0].s, Some(1));
     match (&mine[0].frame, &theirs[0].frame) {
         (
@@ -328,6 +331,7 @@ fn private_channels_hide_messages_from_members_without_the_role() {
 
     let (_dan, dan_token) = sign_in(&mut w, "dan", "late-fees-forever");
     let (_cc, cc_token) = sign_in(&mut w, "couch_coop", "two-player-mode");
+    w.sessions.drain(&TokenHash::of(&dan_token));
     w.server
         .send_message(owner, back_room.id, "staff only", None, T0)
         .map(|e| {
@@ -564,4 +568,62 @@ fn the_replay_buffer_is_bounded() {
     assert_eq!(log.since(500).unwrap().len(), 22);
     assert_eq!(log.since(10).unwrap().len(), 512);
     assert!(log.since(9).is_none(), "event 10 fell off the buffer");
+}
+
+#[test]
+fn presence_is_announced_on_sign_in_change_and_last_disconnect() {
+    let mut w = world();
+    let (_dan, dan_token) = sign_in(&mut w, "dan", "late-fees-forever");
+    let dan_hash = TokenHash::of(&dan_token);
+    // The second sign-in announces itself to the first.
+    let (mut cc, cc_token) = sign_in(&mut w, "couch_coop", "two-player-mode");
+    let cc_hash = TokenHash::of(&cc_token);
+    let member = w.member;
+    let seen = w.sessions.drain(&dan_hash);
+    assert!(
+        matches!(seen.as_slice(), [e] if e.frame == ServerFrame::PresenceUpdated { user: member, presence: Presence::Online }),
+        "{seen:?}"
+    );
+    assert!(
+        w.sessions.drain(&cc_hash).is_empty(),
+        "ready already listed everyone"
+    );
+    assert_eq!(w.sessions.presences().len(), 2);
+
+    // A change goes to everyone online, including the member who chose it.
+    let out = cc.handle(
+        ClientFrame::SetPresence {
+            presence: Presence::Idle,
+        },
+        &mut w.server,
+        &mut w.sessions,
+        T0,
+    );
+    assert!(out.is_empty());
+    assert_eq!(w.sessions.drain(&dan_hash).len(), 1);
+    assert_eq!(w.sessions.drain(&cc_hash).len(), 1);
+    // Choosing the same presence again is silent.
+    cc.handle(
+        ClientFrame::SetPresence {
+            presence: Presence::Idle,
+        },
+        &mut w.server,
+        &mut w.sessions,
+        T0,
+    );
+    assert!(w.sessions.drain(&dan_hash).is_empty());
+
+    // A second connection for the same member does not re-announce.
+    let (_cc2, cc2_token) = sign_in(&mut w, "couch_coop", "two-player-mode");
+    assert!(w.sessions.drain(&dan_hash).is_empty());
+    // Closing one of two sessions keeps the member online.
+    assert_eq!(w.sessions.close(&TokenHash::of(&cc2_token)), None);
+    // Closing the last one reports the member, and the adapter announces it.
+    assert_eq!(w.sessions.close(&cc_hash), Some(member));
+    w.sessions.publish_offline(member);
+    let seen = w.sessions.drain(&dan_hash);
+    assert!(
+        matches!(seen.as_slice(), [e] if e.frame == ServerFrame::PresenceUpdated { user: member, presence: Presence::Offline })
+    );
+    assert_eq!(w.sessions.presence_of(member), Presence::Offline);
 }

@@ -9,8 +9,10 @@ let server = itson_server::Server::open(store, password_cost)?;
 ```
 
 `open_in_memory` provides an isolated, temporary database for tests. The adapter performs blocking
-I/O; a future network adapter should give it a database worker rather than run it on an async
-executor thread. There is no new server binary or command-line data-directory option in this change.
+I/O. The HTTP adapter's dedicated database worker owns `Server<SqliteStore>`; handlers await channel
+replies rather than doing database work on async executor threads. The `itson-server` binary creates
+`DIR/itson.sqlite3` from `--data-dir DIR`. See [GATEWAY.md](GATEWAY.md) for the worker, HTTP API and
+connection lifetime design.
 
 ## Files and durability
 

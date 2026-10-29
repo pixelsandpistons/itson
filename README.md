@@ -6,9 +6,9 @@ Run a text and voice chat server at home. Accounts are made on your server, not 
 every message, file and setting is stored in a folder you choose. A native desktop app for Linux and
 Windows connects to as many servers as you like.
 
-> **Early development.** There is no usable server or app yet. This repository holds the wire
-> protocol, core rules and the Phase 0 experiments that decide the voice design and GUI toolkit.
-> Nothing here has had a security review.
+> **Early development.** The first server binary supports accounts and text over HTTP and WebSocket.
+> There is no desktop app or voice adapter yet. The server uses plain HTTP; configure TLS or a TLS
+> reverse proxy before exposing it. Nothing here has had a security review.
 
 ## Made with AI
 
@@ -35,7 +35,7 @@ The full plan, architecture and phases are in [docs/PLAN.md](docs/PLAN.md).
 |---|---|
 | `itson-protocol` v0.2 | Built and tested. IDs, version negotiation, permission flags, JSON event frames with sequence numbers and resume, binary voice datagram header. |
 | `itson-domain` | Built and tested. Permission resolution with channel overwrites and timeouts, message and username rules, ID generator. |
-| `itson-server` | Core logic built and tested: setup, invites, accounts, sign-in, hashed session tokens, roles, channels, messages, history, timeouts, bans, and the gateway state machine with per-session event logs for resume. In-memory and SQLite stores with versioned migrations; no HTTP or QUIC adapter yet. |
+| `itson-server` | Runnable HTTP/WebSocket server with SQLite persistence: setup, registration, sign-in, bearer-authenticated history, message gateway and resume. Core operations also include invites, roles, channels, timeouts and bans. No TLS or QUIC voice adapter yet. |
 | `itson-client-core` | Connection state machine built and tested: handshake, heartbeat, resume, sign-out handling. |
 | `itson-voice` | Jitter buffer built and tested. |
 | Voice-over-QUIC spike | Works on loopback, including loss recovery and certificate pinning. Internet and microphone tests are pending. |
@@ -43,8 +43,17 @@ The full plan, architecture and phases are in [docs/PLAN.md](docs/PLAN.md).
 | Desktop app | Not started. |
 
 Phase 0 evidence and open items are in [PHASE0.md](PHASE0.md). Phase 1 has started with the
-server's core and [SQLite store](docs/STORAGE.md); the next steps are the HTTP and WebSocket adapter
-and the headless CLI.
+server's core, [SQLite store](docs/STORAGE.md), and [HTTP/WebSocket adapter](docs/GATEWAY.md).
+The next steps include Argon2id and the headless CLI.
+
+Run the server on loopback with an explicit data directory:
+
+```sh
+cargo run -p itson-server --locked -- --data-dir ./itson-data --listen 127.0.0.1:8080
+```
+
+It creates `itson-data/itson.sqlite3` and reports whether setup has run. The [gateway guide](docs/GATEWAY.md)
+documents the setup/sign-in requests, bearer tokens, WebSocket exchange and current limits.
 
 ## Build and check
 
@@ -70,7 +79,7 @@ cargo test --workspace --locked
 |---|---|
 | `crates/itson-protocol/` | Wire types. The module docs in `frame.rs` and `voice.rs` describe the protocol. |
 | `crates/itson-domain/` | Server rules with no storage or network. |
-| `crates/itson-server/` | Server core: store trait, SQLite adapter and migrations, credentials, service operations, gateway sessions. Network adapters plug in from outside. |
+| `crates/itson-server/` | Server core, SQLite migrations, dedicated database worker, HTTP/WebSocket adapter and runnable binary. |
 | `crates/itson-client-core/` | Client state the GUI and CLI share. |
 | `crates/itson-voice/` | Voice logic with no audio device or network. |
 | `spikes/` | Phase 0 experiments; see [spikes/README.md](spikes/README.md). |

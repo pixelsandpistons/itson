@@ -11,11 +11,24 @@ installed SQLite and provides WAL consistently on Linux and Windows. This is the
 to the pure-Rust preference: SQLite is compiled from C by `libsqlite3-sys` 0.39.1. No asynchronous
 runtime or migration framework is added. The exact transitive versions are in `Cargo.lock`.
 
+`itson-server` uses **axum =0.8.9**, with `http1`, `json`, `query`, `tokio` and `ws` and default
+features disabled, for the HTTP routes and WebSocket transport. Tokio, serde and serde_json already
+exist in the workspace and are now direct server dependencies. Tests enable Tokio's `test-util`
+feature for deterministic resume-grace timers.
+
+The integration tests directly name **tokio-tungstenite =0.29.0** with only `handshake`, reusing the
+same client implementation already required by axum's `ws` feature. Axum exposes the server socket
+but does not re-export a WebSocket client. This adds no separately resolved client package and no
+HTTP client dependency; test HTTP requests use local TCP sockets. Application transport code uses
+axum's inherent `send` and `recv` methods without another futures dependency.
+
 | Crate | Version | Used by |
 |---|---|---|
 | serde, serde_core, serde_derive | 1.0.229 | protocol |
 | serde_json (and itoa, memchr, zmij) | 1.0.151 | protocol tests |
 | rusqlite (bundled), libsqlite3-sys | 0.41.0, 0.39.1 | server SQLite store and migrations |
+| axum | 0.8.9 | server HTTP and WebSocket adapter |
+| tokio-tungstenite (already required by axum) | 0.29.0 | real WebSocket client in server integration tests |
 | syn, quote, proc-macro2, unicode-ident | 3.0.6, 1.0.47, 1.0.107, 1.0.26 | serde_derive |
 
 ## Phase 0 spikes, added 29 October 2026
@@ -41,7 +54,6 @@ cmake, pkg-config, ALSA headers, and Wayland, X11, xkbcommon, OpenGL, fontconfig
 
 | Crate | Purpose |
 |---|---|
-| axum (with `ws`) | HTTP sign-in and the WebSocket gateway |
 | argon2 | Replaces PBKDF2 as the password scheme; old hashes upgrade on sign-in |
 | zstd | Negotiated event-stream compression |
 

@@ -373,9 +373,9 @@ fn message_history_pagination(store: &mut dyn Store) -> Result<(), StoreError> {
     assert_eq!(history(store, Some(104), 2)?, vec![103, 101]);
     assert_eq!(history(store, Some(103), 10)?, vec![101, 100]);
     assert_eq!(history(store, Some(102), 10)?, vec![101, 100]);
-    assert_eq!(history(store, Some(100), 10)?, vec![]);
-    assert_eq!(history(store, Some(0), 10)?, vec![]);
-    assert_eq!(history(store, None, 0)?, vec![]);
+    assert!(history(store, Some(100), 10)?.is_empty());
+    assert!(history(store, Some(0), 10)?.is_empty());
+    assert!(history(store, None, 0)?.is_empty());
     assert_eq!(history(store, None, usize::MAX)?, vec![104, 103, 101, 100]);
     assert_eq!(
         store.messages_before(ChannelId(80), None, 10)?,

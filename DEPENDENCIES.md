@@ -2,7 +2,8 @@
 
 ## In use
 
-Core crates use only serde and serde_json.
+Core crates use serde and serde_json. `itson-server` also uses `ring` (already in the tree for QUIC) for
+PBKDF2 password hashing, SHA-256 token hashing and random bytes.
 
 | Crate | Version | Used by |
 |---|---|---|
@@ -28,6 +29,15 @@ The lockfile holds 635 packages with these, most of them from the two GUI toolki
 
 The build image `itson/app-build:20261029` (`tools/build-image/Dockerfile`) adds rustfmt, clippy,
 cmake, pkg-config, ALSA headers, and Wayland, X11, xkbcommon, OpenGL, fontconfig and FreeType headers.
+
+## Proposed for Phase 1 adapters, not yet added
+
+| Crate | Purpose |
+|---|---|
+| rusqlite (bundled SQLite) | The `Store` implementation that persists data |
+| axum (with `ws`) | HTTP sign-in and the WebSocket gateway |
+| argon2 | Replaces PBKDF2 as the password scheme; old hashes upgrade on sign-in |
+| zstd | Negotiated event-stream compression |
 
 ## Not yet added
 

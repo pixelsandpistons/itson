@@ -33,14 +33,17 @@ The full plan, architecture and phases are in [docs/PLAN.md](docs/PLAN.md).
 
 | Piece | State |
 |---|---|
-| `itson-protocol` v0.1 | Built and tested. IDs, version negotiation, permission flags, JSON event frames, binary voice datagram header. |
+| `itson-protocol` v0.2 | Built and tested. IDs, version negotiation, permission flags, JSON event frames with sequence numbers and resume, binary voice datagram header. |
 | `itson-domain` | Built and tested. Permission resolution with channel overwrites and timeouts, message and username rules, ID generator. |
+| `itson-server` | Core logic built and tested: setup, invites, accounts, sign-in, hashed session tokens, roles, channels, messages, history, timeouts, bans, and the gateway state machine with per-session event logs for resume. In-memory store only; no HTTP, QUIC or SQLite adapter yet. |
+| `itson-client-core` | Connection state machine built and tested: handshake, heartbeat, resume, sign-out handling. |
 | `itson-voice` | Jitter buffer built and tested. |
 | Voice-over-QUIC spike | Works on loopback, including loss recovery and certificate pinning. Internet and microphone tests are pending. |
 | GUI toolkit spikes (iced, egui) | Build on Linux. Not yet measured. |
-| Server, desktop app | Not started. |
+| Desktop app | Not started. |
 
-Phase 0 evidence and open items are in [PHASE0.md](PHASE0.md).
+Phase 0 evidence and open items are in [PHASE0.md](PHASE0.md). Phase 1 has started with the
+server's core; the next steps are the SQLite store, the HTTP and WebSocket adapter, and the headless CLI.
 
 ## Build and check
 
@@ -66,14 +69,17 @@ cargo test --workspace --locked
 |---|---|
 | `crates/itson-protocol/` | Wire types. The module docs in `frame.rs` and `voice.rs` describe the protocol. |
 | `crates/itson-domain/` | Server rules with no storage or network. |
+| `crates/itson-server/` | Server core: store trait, credentials, service operations, gateway sessions. Adapters plug in from outside. |
+| `crates/itson-client-core/` | Client state the GUI and CLI share. |
 | `crates/itson-voice/` | Voice logic with no audio device or network. |
 | `spikes/` | Phase 0 experiments; see [spikes/README.md](spikes/README.md). |
 | `tools/` | Build image and check script. |
 
 ## Protocol in brief
 
-- Text events are JSON objects `{"op": "...", "d": {...}}` over a WebSocket. Sign-in happens over
-  HTTP and returns a session token; the socket sends `hello`, then `authenticate`.
+- Text events are JSON objects `{"op": "...", "d": {...}}` over a WebSocket; server events carry a
+  sequence number `s`. Sign-in happens over HTTP and returns a session token; the socket sends `hello`,
+  then `authenticate`, or `resume` with the last sequence seen after a drop.
 - IDs are 53-bit numbers: 41 bits of milliseconds since 2026-01-01 UTC and a 12-bit sequence. They
   sort by time and stay exact in JavaScript.
 - Permission flags are a JSON number. Unknown bits from newer peers are dropped.
@@ -83,7 +89,8 @@ cargo test --workspace --locked
 ## Contributing
 
 Read [AGENTS.md](AGENTS.md); its rules apply to people and AI agents alike. Run `./tools/check.sh`
-before opening a pull request. Tests use fictional data only.
+before opening a pull request. Tests use fictional data only. An AI assistant joining the project can
+start from [docs/AI-COLLABORATOR-BRIEF.md](docs/AI-COLLABORATOR-BRIEF.md).
 
 ## Licence
 

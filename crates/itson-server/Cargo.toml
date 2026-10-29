@@ -1,0 +1,20 @@
+[package]
+name = "itson-server"
+description = "The It's On server: accounts, channels, messages, gateway sessions"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+itson-protocol.workspace = true
+itson-domain.workspace = true
+ring.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

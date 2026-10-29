@@ -3,7 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use itson_protocol::frame::{ClientFrame, ErrorCode, ServerFrame, SessionToken};
+use itson_protocol::frame::{ClientFrame, ErrorCode, ServerEnvelope, ServerFrame, SessionToken};
 use itson_protocol::id::{ITSON_EPOCH_MS, MAX_ID, compose_id};
 use itson_protocol::model::{Message, Presence};
 use itson_protocol::version::{self, ProtocolVersion, VersionRange, negotiate};
@@ -47,6 +47,10 @@ fn every_client_frame_round_trips() {
         },
         ClientFrame::Authenticate {
             token: SessionToken::new("fictional-token".into()),
+        },
+        ClientFrame::Resume {
+            token: SessionToken::new("fictional-token".into()),
+            last_seq: 41,
         },
         ClientFrame::Heartbeat { seq: 3 },
         ClientFrame::SendMessage {
@@ -156,6 +160,35 @@ fn message_created_omits_absent_optional_fields() {
 }
 
 #[test]
+fn envelopes_carry_sequence_numbers_only_on_events() {
+    let event = ServerEnvelope::event(
+        12,
+        ServerFrame::TypingStarted {
+            channel: ChannelId(1),
+            user: UserId(2),
+        },
+    );
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        value,
+        json!({"s": 12, "op": "typing_started", "d": {"channel": 1, "user": 2}})
+    );
+    let back: ServerEnvelope = serde_json::from_value(value).unwrap();
+    assert_eq!(back, event);
+
+    let reply = ServerEnvelope::reply(ServerFrame::HeartbeatAck { seq: 3 });
+    assert_eq!(
+        serde_json::to_value(&reply).unwrap(),
+        json!({"op": "heartbeat_ack", "d": {"seq": 3}})
+    );
+    // A 0.1 client's view of the same bytes: no `s` field is fine.
+    let old: ServerEnvelope =
+        serde_json::from_str(r#"{"op":"resumed","d":{"replayed":4}}"#).unwrap();
+    assert_eq!(old.s, None);
+    assert_eq!(old.frame, ServerFrame::Resumed { replayed: 4 });
+}
+
+#[test]
 fn ids_fit_in_javascript_numbers_and_carry_time() {
     assert_eq!(MAX_ID, (1u64 << 53) - 1);
     let raw = compose_id(1_000, 5).unwrap();
@@ -191,6 +224,11 @@ fn version_negotiation_picks_the_highest_shared_version() {
     assert_eq!(
         negotiate(VersionRange::SUPPORTED, VersionRange::SUPPORTED),
         Some(version::CURRENT)
+    );
+    // A 0.1-only client still connects to this server.
+    assert_eq!(
+        negotiate(range(v(0, 1), v(0, 1)), VersionRange::SUPPORTED),
+        Some(version::OLDEST)
     );
 }
 

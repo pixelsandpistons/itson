@@ -12,8 +12,11 @@ pub struct ProtocolVersion {
     pub minor: u16,
 }
 
-/// The version this crate describes.
-pub const CURRENT: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
+/// The version this crate describes. 0.2 added sequence numbers and resume;
+/// a 0.1 peer simply never sees `s` or sends `resume`.
+pub const CURRENT: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
+/// The oldest version this crate still speaks.
+pub const OLDEST: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
 
 /// An inclusive range of versions a peer can speak.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -25,7 +28,7 @@ pub struct VersionRange {
 impl VersionRange {
     /// Versions this crate supports.
     pub const SUPPORTED: VersionRange = VersionRange {
-        min: CURRENT,
+        min: OLDEST,
         max: CURRENT,
     };
 

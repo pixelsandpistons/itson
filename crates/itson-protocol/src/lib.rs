@@ -11,7 +11,7 @@ pub mod permissions;
 pub mod version;
 pub mod voice;
 
-pub use frame::{ClientFrame, ErrorCode, ServerFrame, SessionToken};
+pub use frame::{ClientFrame, ErrorCode, ServerEnvelope, ServerFrame, SessionToken};
 pub use id::{ChannelId, MessageId, RoleId, UserId};
 pub use permissions::Permissions;
 pub use version::{ProtocolVersion, VersionRange};

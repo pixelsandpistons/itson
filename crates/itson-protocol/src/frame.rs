@@ -1,9 +1,10 @@
 //! JSON frames exchanged over the event WebSocket.
 //!
-//! Every frame is an object `{"op": "<name>", "d": {...}}`. Account creation
-//! and sign-in happen over HTTP and return a [`SessionToken`]; the socket then
-//! authenticates with it. A connection must send `hello` first and
-//! `authenticate` second; servers close connections that do otherwise.
+//! Every frame is an object `{"op": "<name>", "d": {...}}`; server events add
+//! a sequence number `s` ([`ServerEnvelope`]). Account creation and sign-in
+//! happen over HTTP and return a [`SessionToken`]; the socket then
+//! authenticates with it. A connection must send `hello` first and then
+//! `authenticate` or `resume`; servers close connections that do otherwise.
 
 use crate::id::{ChannelId, MessageId, UserId};
 use crate::model::{Channel, Message, Presence, Role, User};
@@ -44,6 +45,13 @@ pub enum ClientFrame {
     },
     Authenticate {
         token: SessionToken,
+    },
+    /// Continue an earlier gateway session instead of `authenticate`. The
+    /// server replays events after `last_seq` or answers with
+    /// `error: cannot_resume`, after which the client authenticates afresh.
+    Resume {
+        token: SessionToken,
+        last_seq: u64,
     },
     Heartbeat {
         seq: u64,
@@ -88,6 +96,33 @@ pub enum ClientFrame {
     },
 }
 
+/// A server frame with its gateway sequence number.
+///
+/// Serialized flat: `{"s": 12, "op": "message_created", "d": {...}}`. Only
+/// events that a client may need replayed carry `s`; replies such as
+/// `welcome`, `ready`, `heartbeat_ack` and `error` omit it. Clients remember
+/// the highest `s` they have seen and send it in `resume`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerEnvelope {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub s: Option<u64>,
+    #[serde(flatten)]
+    pub frame: ServerFrame,
+}
+
+impl ServerEnvelope {
+    pub fn reply(frame: ServerFrame) -> Self {
+        ServerEnvelope { s: None, frame }
+    }
+
+    pub fn event(seq: u64, frame: ServerFrame) -> Self {
+        ServerEnvelope {
+            s: Some(seq),
+            frame,
+        }
+    }
+}
+
 /// Frames a server sends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", content = "d", rename_all = "snake_case")]
@@ -104,6 +139,11 @@ pub enum ServerFrame {
         user: User,
         channels: Vec<Channel>,
         roles: Vec<Role>,
+    },
+    /// Reply to a successful `resume`. Replayed events follow, each with its
+    /// original sequence number.
+    Resumed {
+        replayed: u64,
     },
     HeartbeatAck {
         seq: u64,
@@ -160,6 +200,8 @@ pub enum ErrorCode {
     NotAuthenticated,
     /// The session token is unknown, expired or revoked.
     InvalidToken,
+    /// The gateway session is gone or the gap is too large to replay.
+    CannotResume,
     Forbidden,
     NotFound,
     InvalidContent,

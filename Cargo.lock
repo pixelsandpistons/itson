@@ -2538,6 +2538,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "itson-client-core"
+version = "0.0.1"
+dependencies = [
+ "itson-protocol",
+]
+
+[[package]]
 name = "itson-domain"
 version = "0.0.1"
 dependencies = [
@@ -2565,6 +2572,16 @@ name = "itson-protocol"
 version = "0.0.1"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "itson-server"
+version = "0.0.1"
+dependencies = [
+ "itson-domain",
+ "itson-protocol",
+ "ring",
  "serde_json",
 ]
 

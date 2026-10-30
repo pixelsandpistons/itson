@@ -1,11 +1,12 @@
 //! Exercise the actual executable with a new, isolated data directory.
 
-use itson_protocol::{Permissions, UserId};
+use itson_protocol::UserId;
 use itson_server::sqlite::SqliteStore;
-use itson_server::store::{Account, Settings, Store};
+use itson_server::store::Store;
+use serde_json::{Value, json};
 use std::error::Error;
 use std::fs;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -91,16 +92,24 @@ impl RunningServer {
         Ok(server)
     }
 
-    fn startup(&self, setup_complete: bool) -> Result<SocketAddr, Box<dyn Error>> {
+    fn startup(
+        &self,
+        setup_complete: bool,
+    ) -> Result<(SocketAddr, Option<String>), Box<dyn Error>> {
         let mut lines = Vec::new();
-        for _ in 0..4 {
-            lines.push(
-                self.lines
-                    .recv_timeout(Duration::from_secs(15))
-                    .map_err(|error| {
-                        io::Error::other(format!("could not read server startup output: {error}"))
-                    })??,
-            );
+        for _ in 0..8 {
+            let line = self
+                .lines
+                .recv_timeout(Duration::from_secs(15))
+                .map_err(|error| {
+                    io::Error::other(format!("could not read server startup output: {error}"))
+                })??;
+            let finished =
+                line.contains("plain HTTP") && line.contains("TLS or a TLS reverse proxy");
+            lines.push(line);
+            if finished {
+                break;
+            }
         }
         let address: SocketAddr = lines[0]
             .strip_prefix("itson is listening on http://")
@@ -127,8 +136,47 @@ impl RunningServer {
         assert!(lines.iter().any(|line| {
             line.contains("plain HTTP") && line.contains("TLS or a TLS reverse proxy")
         }));
-        Ok(address)
+        let codes: Vec<_> = lines
+            .iter()
+            .filter_map(|line| line.strip_prefix("Setup code: "))
+            .collect();
+        assert_eq!(codes.len(), usize::from(!setup_complete));
+        let code = codes.first().map(|code| (*code).to_owned());
+        if let Some(code) = &code {
+            assert!(!code.is_empty());
+            assert!(!code.chars().any(char::is_whitespace));
+        }
+        Ok((address, code))
     }
+}
+
+fn complete_setup(address: SocketAddr, setup_code: &str) -> Result<UserId, Box<dyn Error>> {
+    let body = serde_json::to_vec(&json!({
+        "server_name": "Fictional moon garden", "username": "moon_moth",
+        "password": "fictional binary setup password", "setup_code": setup_code,
+    }))?;
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
+    stream.set_read_timeout(Some(Duration::from_secs(15)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    write!(
+        stream,
+        "POST /api/setup HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )?;
+    stream.write_all(&body)?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| io::Error::other("setup returned no HTTP response"))?;
+    assert!(head.starts_with("HTTP/1.1 201 "), "{response}");
+    let body: Value = serde_json::from_str(body)?;
+    assert!(!body.to_string().contains(setup_code));
+    Ok(UserId(
+        body["user_id"]
+            .as_u64()
+            .ok_or("setup did not return an owner ID")?,
+    ))
 }
 
 impl Drop for RunningServer {
@@ -148,44 +196,26 @@ fn server_binary_creates_database_and_reports_setup_across_restarts() -> Result<
     let data_dir = directory.path.join("nested fictional server data");
     let database = data_dir.join("itson.sqlite3");
     assert!(!data_dir.exists());
-    {
+    let owner = {
         let server = RunningServer::start(&data_dir)?;
-        let address = server.startup(false)?;
+        let (address, setup_code) = server.startup(false)?;
         assert!(database.is_file());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(&data_dir)?.permissions().mode() & 0o077, 0);
         }
-        drop(TcpStream::connect_timeout(
-            &address,
-            Duration::from_secs(2),
-        )?);
-    }
-    let account = Account {
-        id: UserId(10),
-        username: "moon_moth".into(),
-        display_name: Some("Fictional moon moth".into()),
-        password_hash: "fictional-password-hash".into(),
-        roles: Vec::new(),
-        created_at_unix_ms: 1_800_000_000_000,
-        timed_out_until_unix_ms: None,
-        banned: false,
+        complete_setup(
+            address,
+            setup_code
+                .as_deref()
+                .ok_or("startup omitted the setup code")?,
+        )?
     };
-    let settings = Settings {
-        name: "Fictional moon garden".into(),
-        owner: account.id,
-        everyone: Permissions::DEFAULT_EVERYONE,
-        open_registration: false,
-    };
-    {
-        let mut store = SqliteStore::open(&database)?;
-        store.insert_account(account.clone())?;
-        store.put_settings(settings.clone())?;
-    }
     {
         let server = RunningServer::start(&data_dir)?;
-        let address = server.startup(true)?;
+        let (address, setup_code) = server.startup(true)?;
+        assert!(setup_code.is_none());
         drop(TcpStream::connect_timeout(
             &address,
             Duration::from_secs(2),
@@ -193,8 +223,16 @@ fn server_binary_creates_database_and_reports_setup_across_restarts() -> Result<
     }
     {
         let store = SqliteStore::open(&database)?;
-        assert_eq!(store.settings()?, Some(settings));
-        assert_eq!(store.account(account.id)?, Some(account));
+        let settings = store
+            .settings()?
+            .ok_or("setup settings did not survive restart")?;
+        assert_eq!(settings.name, "Fictional moon garden");
+        assert_eq!(settings.owner, owner);
+        let account = store
+            .account(owner)?
+            .ok_or("owner did not survive restart")?;
+        assert_eq!(account.username, "moon_moth");
+        assert!(account.password_hash.starts_with("$pbkdf2-sha256$"));
     }
     Ok(())
 }

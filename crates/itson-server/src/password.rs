@@ -21,6 +21,22 @@ pub const MAX_PASSWORD_BYTES: usize = 256;
 const SALT_LEN: usize = 16;
 const HASH_LEN: usize = 32;
 
+#[cfg(test)]
+std::thread_local! {
+    static WORK_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// Hash derivations and verification derivations on this test's thread.
+#[cfg(test)]
+pub(crate) fn work_counts() -> (usize, usize) {
+    WORK_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_work_counts() {
+    WORK_COUNTS.with(|counts| counts.set((0, 0)));
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasswordError {
     TooShort,
@@ -91,6 +107,11 @@ pub fn hash(password: &str, cost: Cost) -> Result<String, PasswordError> {
 fn hash_with_salt(password: &str, cost: Cost, salt: &[u8]) -> String {
     let iterations = NonZeroU32::new(cost.iterations.max(1)).unwrap_or(NonZeroU32::MIN);
     let mut out = [0u8; HASH_LEN];
+    #[cfg(test)]
+    WORK_COUNTS.with(|counts| {
+        let (hashes, verifications) = counts.get();
+        counts.set((hashes + 1, verifications));
+    });
     pbkdf2::derive(
         pbkdf2::PBKDF2_HMAC_SHA256,
         iterations,
@@ -125,6 +146,11 @@ pub fn verify(password: &str, stored: &str, cost: Cost) -> Verdict {
     let Some(iterations_nz) = NonZeroU32::new(iterations) else {
         return Verdict::Unreadable;
     };
+    #[cfg(test)]
+    WORK_COUNTS.with(|counts| {
+        let (hashes, verifications) = counts.get();
+        counts.set((hashes, verifications + 1));
+    });
     let ok = pbkdf2::verify(
         pbkdf2::PBKDF2_HMAC_SHA256,
         iterations_nz,

@@ -18,6 +18,7 @@ use itson_protocol::limits::MAX_NAME_CHARS;
 use itson_protocol::model::{Channel, ChannelKind, Message, Role, User};
 use itson_protocol::{ChannelId, MessageId, Permissions, RoleId, SessionToken, UserId};
 use std::fmt;
+use std::sync::Arc;
 
 /// Thirty days.
 pub const SESSION_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
@@ -114,22 +115,102 @@ pub enum Event {
     ChannelCreated(StoredChannel),
 }
 
+/// A credential snapshot that can be verified away from the database worker.
+/// Fields and Debug output deliberately do not expose the captured hash.
+pub(crate) struct SignInChallenge {
+    account: Option<(UserId, Arc<str>)>,
+    dummy_hash: Arc<str>,
+    cost: Cost,
+    server: Arc<()>,
+}
+
+impl fmt::Debug for SignInChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SignInChallenge(<redacted>)")
+    }
+}
+
+impl SignInChallenge {
+    /// Consumes the snapshot, verifying the password and preparing any rehash.
+    /// This performs CPU-intensive work; async adapters use a blocking pool.
+    pub(crate) fn verify(self, password: &str) -> Result<VerifiedSignIn, ServiceError> {
+        let stored = self
+            .account
+            .as_ref()
+            .map_or(self.dummy_hash.as_ref(), |(_, hash)| hash.as_ref());
+        let verdict = password::verify(password, stored, self.cost);
+        if verdict == Verdict::Unreadable {
+            // Corrupt or unsupported hashes must not skip password work.
+            let _ = password::verify(password, &self.dummy_hash, self.cost);
+            return Err(ServiceError::BadCredentials);
+        }
+        let Some((user, expected_hash)) = self.account else {
+            // A dummy check never authenticates, even if its password matched.
+            return Err(ServiceError::BadCredentials);
+        };
+        let rehashed = match verdict {
+            Verdict::Wrong | Verdict::Unreadable => return Err(ServiceError::BadCredentials),
+            Verdict::Correct => None,
+            // Keep accepting the valid credential if fresh randomness fails,
+            // matching the synchronous sign-in's existing upgrade policy.
+            Verdict::CorrectNeedsRehash => password::hash(password, self.cost).ok(),
+        };
+        Ok(VerifiedSignIn {
+            user,
+            expected_hash,
+            rehashed,
+            server: self.server,
+        })
+    }
+}
+
+/// A single-use proof for the exact server and hash checked by a challenge.
+pub(crate) struct VerifiedSignIn {
+    user: UserId,
+    expected_hash: Arc<str>,
+    rehashed: Option<String>,
+    server: Arc<()>,
+}
+
+impl fmt::Debug for VerifiedSignIn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("VerifiedSignIn(<redacted>)")
+    }
+}
+
 /// The server. One instance owns the store and the id generator.
 #[derive(Debug)]
 pub struct Server<S: Store> {
     store: S,
     ids: SnowflakeGenerator,
     cost: Cost,
+    dummy_password_hash: Arc<str>,
+    sign_in_identity: Arc<()>,
 }
 
 impl<S: Store> Server<S> {
     pub fn open(store: S, cost: Cost) -> Result<Self, ServiceError> {
         let ids = SnowflakeGenerator::resume_after(store.max_id()?);
-        Ok(Server { store, ids, cost })
+        // One valid current-cost hash is reused for unknown usernames. The
+        // dummy password cannot produce a proof without a matching account.
+        let dummy_password_hash =
+            password::hash("dummy sign-in challenge", cost).map_err(ServiceError::Password)?;
+        Ok(Server {
+            store,
+            ids,
+            cost,
+            dummy_password_hash: Arc::from(dummy_password_hash),
+            sign_in_identity: Arc::new(()),
+        })
     }
 
     pub fn store(&self) -> &S {
         &self.store
+    }
+
+    /// Deletes expired persisted sessions, returning how many were removed.
+    pub fn delete_expired_sessions(&mut self, now: u64) -> Result<usize, ServiceError> {
+        Ok(self.store.delete_expired_sessions(now)?)
     }
 
     fn next_id(&mut self, now: u64) -> Result<u64, ServiceError> {
@@ -268,28 +349,50 @@ impl<S: Store> Server<S> {
         device: &str,
         now: u64,
     ) -> Result<(SessionToken, User), ServiceError> {
-        let username = normalize_username(username).map_err(|_| ServiceError::BadCredentials)?;
-        let Some(mut account) = self.store.account_by_username(&username)? else {
-            // Burn the same time as a real check so usernames cannot be probed by timing.
-            let _ = password::verify(
-                password,
-                &password::hash("x", self.cost).unwrap_or_default(),
-                self.cost,
-            );
-            return Err(ServiceError::BadCredentials);
+        let proof = self.prepare_sign_in(username)?.verify(password)?;
+        self.finish_sign_in(proof, device, now)
+    }
+
+    /// Reads the current credential without performing password derivation.
+    /// Unknown and invalid usernames receive a dummy challenge, so their
+    /// verification still performs one current-cost password check.
+    pub(crate) fn prepare_sign_in(&self, username: &str) -> Result<SignInChallenge, ServiceError> {
+        let account = match normalize_username(username) {
+            Ok(username) => self.store.account_by_username(&username)?,
+            Err(_) => None,
         };
-        match password::verify(password, &account.password_hash, self.cost) {
-            Verdict::Wrong | Verdict::Unreadable => return Err(ServiceError::BadCredentials),
-            Verdict::Correct => {}
-            Verdict::CorrectNeedsRehash => {
-                if let Ok(rehashed) = password::hash(password, self.cost) {
-                    account.password_hash = rehashed;
-                    self.store.update_account(account.clone())?;
-                }
-            }
+        Ok(SignInChallenge {
+            account: account.map(|account| (account.id, Arc::from(account.password_hash))),
+            dummy_hash: Arc::clone(&self.dummy_password_hash),
+            cost: self.cost,
+            server: Arc::clone(&self.sign_in_identity),
+        })
+    }
+
+    /// Commits a verified sign-in after re-reading credentials and moderation
+    /// state. CPU-intensive verification and any rehash have already finished.
+    pub(crate) fn finish_sign_in(
+        &mut self,
+        proof: VerifiedSignIn,
+        device: &str,
+        now: u64,
+    ) -> Result<(SessionToken, User), ServiceError> {
+        if !Arc::ptr_eq(&self.sign_in_identity, &proof.server) {
+            return Err(ServiceError::BadCredentials);
+        }
+        let mut account = self
+            .store
+            .account(proof.user)?
+            .ok_or(ServiceError::BadCredentials)?;
+        if account.password_hash.as_str() != proof.expected_hash.as_ref() {
+            return Err(ServiceError::BadCredentials);
         }
         if account.banned {
             return Err(ServiceError::Banned);
+        }
+        if let Some(rehashed) = proof.rehashed {
+            account.password_hash = rehashed;
+            self.store.update_account(account.clone())?;
         }
         let (token, token_hash) = token::generate()
             .ok_or_else(|| ServiceError::Internal("random source unavailable".into()))?;
@@ -700,3 +803,6 @@ fn check_name(name: &str) -> Result<String, ServiceError> {
     }
     Ok(name.to_owned())
 }
+
+#[cfg(test)]
+mod sign_in_tests;

@@ -107,6 +107,10 @@ pub trait Store {
     fn insert_session(&mut self, session: Session) -> Result<(), StoreError>;
     fn delete_session(&mut self, token_hash: &TokenHash) -> Result<(), StoreError>;
     fn sessions_for(&self, user: UserId) -> Result<Vec<Session>, StoreError>;
+    /// Atomically deletes every session whose expiry is at or before `now`,
+    /// across all users. Returns the number deleted, or zero if none expired.
+    /// Other records and the ID high-water mark are unchanged.
+    fn delete_expired_sessions(&mut self, now: u64) -> Result<usize, StoreError>;
 
     fn invite(&self, code: &str) -> Result<Option<Invite>, StoreError>;
     fn insert_invite(&mut self, invite: Invite) -> Result<(), StoreError>;
@@ -233,6 +237,13 @@ impl Store for MemoryStore {
             .filter(|s| s.user == user)
             .cloned()
             .collect())
+    }
+
+    fn delete_expired_sessions(&mut self, now: u64) -> Result<usize, StoreError> {
+        let previous = self.sessions.len();
+        self.sessions
+            .retain(|_, session| session.expires_at_unix_ms > now);
+        Ok(previous - self.sessions.len())
     }
 
     fn invite(&self, code: &str) -> Result<Option<Invite>, StoreError> {

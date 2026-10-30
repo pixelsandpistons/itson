@@ -38,6 +38,7 @@ Databases with newer versions are rejected with a backend error; there are no do
 | Version | Migration | Contents |
 |---|---|---|
 | 1 | [001_initial.sql](../crates/itson-server/src/sqlite/migrations/001_initial.sql) | Settings, accounts and ordered roles, sessions, invites, roles, channels and ordered overwrites, messages, and the ID high-water mark. |
+| 2 | [002_sessions_expiry_index.sql](../crates/itson-server/src/sqlite/migrations/002_sessions_expiry_index.sql) | Index on `sessions(expires_at)` for expiry cleanup; existing data is retained. |
 
 Add future migration files to the ordered `MIGRATIONS` list in `sqlite.rs`; never rewrite an applied
 migration. A fixture with an older schema should prove each upgrade preserves its data.
@@ -49,7 +50,7 @@ migration. A fixture with an older schema should prove each upgrade preserves it
 | `store_metadata` | Singleton with the largest successfully inserted account, role, channel or message ID, retained after deletion. |
 | `settings` | Optional singleton with the name, owner, everyone permissions and registration policy. |
 | `accounts`, `account_roles` | Unique, immutable usernames; credential hashes; moderation state; role IDs ordered by ordinal, including duplicates. |
-| `sessions` | SHA-256 token hashes, user IDs, device names and expiry times; indexed by user. |
+| `sessions` | SHA-256 token hashes, user IDs, device names and expiry times; indexed by user and expiry. |
 | `invites` | Invite codes, creator, times and use limits. |
 | `roles` | Permission flags and display positions. |
 | `channels`, `channel_overwrites` | Channel kinds, parents, positions and overwrites ordered by ordinal, including duplicate targets. |
@@ -77,3 +78,9 @@ maps storage errors to its existing member-readable errors and protocol `ErrorCo
 The shared conformance suite runs identical expectations against `MemoryStore` and `SqliteStore`.
 File-backed tests cover reopen persistence, WAL, concurrent initialization, schema version checks
 and rollback of a failed migration.
+
+`Store::delete_expired_sessions(now)` removes only sessions whose expiry is at or before `now`
+and returns the count. The adapter runs it on its database worker at startup and hourly. The cutoff
+uses the same unsigned BLOB encoding as stored expiry times; account data and the ID high-water
+mark are retained. Gateway logs remain subject to the core's periodic token revalidation and
+disconnect grace period.

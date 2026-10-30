@@ -149,13 +149,19 @@ async fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), Startu
         println!("Setup is complete. Members can sign in.");
     } else {
         println!("Setup has not run. Create the owner account with POST /api/setup.");
+        if let Some(code) = state.take_setup_code().await {
+            println!("Setup code: {code}");
+        }
     }
     println!(
         "This server uses plain HTTP. Configure TLS or a TLS reverse proxy before exposing it."
     );
-    let server_result = axum::serve(listener, http::router(state.clone()))
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    let server_result = axum::serve(
+        listener,
+        http::router(state.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
     // Let the worker finish accepted operations and close SQLite before exit,
     // including when the HTTP listener stopped with an error.
     let shutdown_result = state.shutdown().await;

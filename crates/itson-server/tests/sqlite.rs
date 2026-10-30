@@ -8,7 +8,7 @@ use itson_server::store::{
     Account, Invite, Session, Settings, Store, StoreError, StoredChannel, StoredRole,
 };
 use itson_server::token::TokenHash;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use std::error::Error;
 use std::fs;
 use std::io;
@@ -195,7 +195,7 @@ fn file_databases_use_wal_and_migrations_are_idempotent() -> Result<(), Box<dyn 
     store.put_settings(settings())?;
     drop(store);
     let connection = Connection::open(database.path())?;
-    assert_eq!(schema_version(&connection)?, 1);
+    assert_eq!(schema_version(&connection)?, 2);
     assert_eq!(journal_mode(&connection)?, "wal");
     let initial_tables = table_names(&connection)?;
     assert!(!initial_tables.is_empty());
@@ -205,7 +205,7 @@ fn file_databases_use_wal_and_migrations_are_idempotent() -> Result<(), Box<dyn 
         assert_eq!(store.settings()?, Some(settings()));
         drop(store);
         let connection = Connection::open(database.path())?;
-        assert_eq!(schema_version(&connection)?, 1);
+        assert_eq!(schema_version(&connection)?, 2);
         assert_eq!(journal_mode(&connection)?, "wal");
         assert_eq!(table_names(&connection)?, initial_tables);
     }
@@ -234,7 +234,7 @@ fn concurrent_first_opens_apply_the_schema_once() -> Result<(), Box<dyn Error>> 
             assert_eq!(maximum, 0);
         }
         let connection = Connection::open(database.path())?;
-        assert_eq!(schema_version(&connection)?, 1);
+        assert_eq!(schema_version(&connection)?, 2);
         assert_eq!(journal_mode(&connection)?, "wal");
     }
     Ok(())
@@ -245,7 +245,7 @@ fn future_schema_is_rejected_without_downgrading() -> Result<(), Box<dyn Error>>
     let database = TestDatabase::new()?;
     let connection = Connection::open(database.path())?;
     connection.execute_batch(
-        "PRAGMA user_version = 2;
+        "PRAGMA user_version = 3;
          CREATE TABLE fictional_future_marker (value TEXT NOT NULL);
          INSERT INTO fictional_future_marker VALUES ('future fictional data');",
     )?;
@@ -255,7 +255,7 @@ fn future_schema_is_rejected_without_downgrading() -> Result<(), Box<dyn Error>>
         Err(StoreError::Backend(_))
     ));
     let connection = Connection::open(database.path())?;
-    assert_eq!(schema_version(&connection)?, 2);
+    assert_eq!(schema_version(&connection)?, 3);
     assert_eq!(table_names(&connection)?, vec!["fictional_future_marker"]);
     assert_eq!(
         connection.query_row("SELECT value FROM fictional_future_marker", [], |row| {
@@ -398,5 +398,166 @@ fn failed_child_insert_rolls_back_account_update_and_old_roles() -> Result<(), B
         })?,
         2
     );
+    Ok(())
+}
+
+fn expiry_session(token: &str, user: u64, expires_at_unix_ms: u64) -> Session {
+    Session {
+        token_hash: TokenHash::of(&SessionToken::new(token.into())),
+        user: UserId(user),
+        device: "Fictional expiry-test desktop".into(),
+        created_at_unix_ms: 0,
+        expires_at_unix_ms,
+    }
+}
+
+fn insert_v1_session(connection: &Connection, session: &Session) -> rusqlite::Result<()> {
+    connection.execute(
+        "INSERT INTO sessions (token_hash, user, device, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            session.token_hash.as_str(),
+            session.user.0.to_be_bytes().as_slice(),
+            session.device,
+            session.created_at_unix_ms.to_be_bytes().as_slice(),
+            session.expires_at_unix_ms.to_be_bytes().as_slice()
+        ],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn upgrading_v1_preserves_data_and_adds_session_expiry_index() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::new()?;
+    let account = transaction_account();
+    let expired = expiry_session("fictional-v1-expired-session", 10, 100);
+    let active = expiry_session("fictional-v1-active-session", 20, u64::MAX);
+    {
+        let connection = Connection::open(database.path())?;
+        connection.execute_batch(include_str!("../src/sqlite/migrations/001_initial.sql"))?;
+        connection.pragma_update(None, "user_version", 1)?;
+        connection.execute(
+            "INSERT INTO settings (singleton, name, owner, everyone, open_registration)
+             VALUES (1, ?1, ?2, ?3, ?4)",
+            params![
+                settings().name,
+                settings().owner.0.to_be_bytes().as_slice(),
+                settings().everyone.bits() as i64,
+                settings().open_registration
+            ],
+        )?;
+        connection.execute(
+            "INSERT INTO accounts
+             (id, username, display_name, password_hash, created_at, timed_out_until, banned)
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
+            params![
+                account.id.0.to_be_bytes().as_slice(),
+                account.username,
+                account.display_name,
+                account.password_hash,
+                account.created_at_unix_ms.to_be_bytes().as_slice(),
+                account.banned
+            ],
+        )?;
+        for (ordinal, role) in account.roles.iter().enumerate() {
+            connection.execute(
+                "INSERT INTO account_roles (account, ordinal, role) VALUES (?1, ?2, ?3)",
+                params![
+                    account.id.0.to_be_bytes().as_slice(),
+                    ordinal as i64,
+                    role.0.to_be_bytes().as_slice()
+                ],
+            )?;
+        }
+        connection.execute(
+            "UPDATE store_metadata SET max_id = ?1 WHERE singleton = 1",
+            [account.id.0.to_be_bytes().as_slice()],
+        )?;
+        insert_v1_session(&connection, &expired)?;
+        insert_v1_session(&connection, &active)?;
+        assert_eq!(schema_version(&connection)?, 1);
+    }
+    {
+        let mut store = SqliteStore::open(database.path())?;
+        assert_eq!(store.settings()?, Some(settings()));
+        assert_eq!(store.account(account.id)?, Some(account.clone()));
+        assert_eq!(store.max_id()?, account.id.0);
+        assert_eq!(store.session(&expired.token_hash)?, Some(expired.clone()));
+        assert_eq!(store.session(&active.token_hash)?, Some(active.clone()));
+        let connection = Connection::open(database.path())?;
+        assert_eq!(schema_version(&connection)?, 2);
+        assert_eq!(
+            connection.query_row(
+                "SELECT tbl_name FROM sqlite_schema WHERE type = 'index' AND name = 'sessions_by_expiry'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            "sessions"
+        );
+        let columns = connection
+            .prepare("PRAGMA index_info(sessions_by_expiry)")?
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert_eq!(columns, vec!["expires_at"]);
+        assert_eq!(store.delete_expired_sessions(100)?, 1);
+    }
+    let mut store = SqliteStore::open(database.path())?;
+    assert_eq!(store.session(&expired.token_hash)?, None);
+    assert_eq!(store.session(&active.token_hash)?, Some(active));
+    assert_eq!(store.settings()?, Some(settings()));
+    assert_eq!(store.account(account.id)?, Some(account.clone()));
+    assert_eq!(store.max_id()?, account.id.0);
+    assert_eq!(store.delete_expired_sessions(100)?, 0);
+    Ok(())
+}
+
+#[test]
+fn failed_expiry_cleanup_rolls_back_every_deletion() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::new()?;
+    let first = expiry_session("fictional-cleanup-first", 10, 99);
+    let second = expiry_session("fictional-cleanup-second", 20, 100);
+    let active = expiry_session("fictional-cleanup-active", 10, 101);
+    let mut store = SqliteStore::open(database.path())?;
+    for session in [&first, &second, &active] {
+        store.insert_session(session.clone())?;
+    }
+    {
+        let connection = Connection::open(database.path())?;
+        connection.execute_batch(
+            "CREATE TABLE fictional_cleanup_probe (deleted INTEGER NOT NULL);
+             INSERT INTO fictional_cleanup_probe VALUES (0);
+             CREATE TRIGGER fictional_fail_second_deletion AFTER DELETE ON sessions
+             BEGIN
+                 UPDATE fictional_cleanup_probe SET deleted = deleted + 1;
+                 SELECT CASE WHEN (SELECT deleted FROM fictional_cleanup_probe) = 2
+                     THEN RAISE(ABORT, 'fictional injected cleanup failure') END;
+             END;",
+        )?;
+    }
+    assert!(matches!(
+        store.delete_expired_sessions(100),
+        Err(StoreError::Backend(_))
+    ));
+    drop(store);
+    {
+        let mut store = SqliteStore::open(database.path())?;
+        for session in [&first, &second, &active] {
+            assert_eq!(store.session(&session.token_hash)?, Some(session.clone()));
+        }
+        assert_eq!(store.max_id()?, 0);
+        let connection = Connection::open(database.path())?;
+        assert_eq!(
+            connection.query_row("SELECT deleted FROM fictional_cleanup_probe", [], |row| {
+                row.get::<_, i64>(0)
+            })?,
+            0
+        );
+        connection.execute_batch("DROP TRIGGER fictional_fail_second_deletion;")?;
+        assert_eq!(store.delete_expired_sessions(100)?, 2);
+    }
+    let store = SqliteStore::open(database.path())?;
+    assert_eq!(store.session(&first.token_hash)?, None);
+    assert_eq!(store.session(&second.token_hash)?, None);
+    assert_eq!(store.session(&active.token_hash)?, Some(active));
     Ok(())
 }

@@ -28,10 +28,14 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
 - `crates/itson-domain`: permission resolution (owner, administrator, roles, channel overwrites in
   everyone/roles/member layers, timeouts), message and username normalisation, ID generator.
 - `crates/itson-server`: sans-I/O server core. `store.rs` has the `Store` trait and a `MemoryStore`;
+  `sqlite.rs` implements `SqliteStore` with bundled SQLite, WAL and versioned migrations
+  ([storage details](STORAGE.md)); shared conformance tests cover both stores.
   `password.rs` hashes with PBKDF2-HMAC-SHA256 in a self-describing format; `token.rs` makes session
   tokens and stores only their SHA-256; `service.rs` is every operation with permission checks
   (`Server<S: Store>`); `gateway.rs` is the per-connection state machine (`Connection`) and the
-  per-session event log with outbox (`Sessions`) that makes `resume` work. No network, no database.
+  per-session event log with outbox (`Sessions`) that makes `resume` work. `http.rs` provides the
+  axum HTTP/WebSocket adapter and dedicated database worker; `main.rs` runs it with `--data-dir` and
+  `--listen`. See [GATEWAY.md](GATEWAY.md). No TLS or QUIC voice adapter yet.
 - `crates/itson-client-core`: `ClientConnection`, the client's handshake/heartbeat/resume state machine.
 - `crates/itson-voice`: a jitter buffer with FEC-aware loss reporting.
 - `spikes/`: Phase 0 experiments (Opus over QUIC with certificate pinning; message lists in iced and
@@ -50,8 +54,8 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
 5. Wire changes bump the version in `crates/itson-protocol/src/version.rs`. Do not edit an exact-JSON
    test just to make it pass; change the version deliberately and update the test with it.
 6. Dependencies are deliberate. Propose a new crate with its exact version and why; record it in
-   `DEPENDENCIES.md`; commit `Cargo.lock`. Pure-Rust crates are preferred. Known plans: `rusqlite`
-   (bundled), `axum` with `ws`, `argon2`, `zstd`.
+   `DEPENDENCIES.md`; commit `Cargo.lock`. Pure-Rust crates are preferred. SQLite and axum are in use;
+   known plans: `argon2`, `zstd`.
 7. No `unsafe`, `unwrap` or `expect` outside tests (`unsafe_code = "forbid"`, clippy denies the other
    two). Return errors with member-readable `Display` text and a machine `ErrorCode`.
 8. Keep GUI code thin; state and logic go in `itson-client-core`.
@@ -63,15 +67,12 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
 
 Each is self-contained and does not collide with the others.
 
-1. **SQLite `Store`.** Implement `itson_server::store::Store` with `rusqlite` (bundled SQLite, WAL
-   mode) in a new module or crate, with versioned schema migrations and the same behaviour as
-   `MemoryStore`. Write a conformance test that runs the existing store expectations against both
-   implementations. Propose the `rusqlite` version in the PR.
-2. **HTTP and WebSocket adapter.** An `axum` server exposing `POST /api/setup`, `POST /api/sign-in`,
-   `POST /api/register`, `GET /api/history`, and `GET /gateway` (WebSocket). The socket handler decodes
-   `ClientFrame`, calls `Connection::handle`, sends `Output::Send`, closes on `Output::Close`, and drains
-   `Sessions::drain` for its token hash after each frame and on a short timer. Keep disconnected
-   sessions for 60 seconds before `Sessions::close`. Enforce `MAX_FRAME_BYTES`.
+1. **SQLite `Store` (implemented).** `SqliteStore` uses `rusqlite` =0.41.0 (bundled SQLite, WAL),
+   versioned migrations and shared conformance tests with `MemoryStore`. See [STORAGE.md](STORAGE.md).
+2. **HTTP and WebSocket adapter (implemented).** `axum` =0.8.9 serves setup, registration, sign-in,
+   history and the gateway. A dedicated worker owns `Server<SqliteStore>`; sockets drive `Connection`,
+   drain outboxes every 25 ms and retain disconnected gateway sessions for 60 seconds. The first
+   `itson-server` binary accepts `--data-dir` and `--listen`. See [GATEWAY.md](GATEWAY.md).
 3. **Argon2id.** Add the `argon2` crate behind `password.rs`: new hashes use argon2id at the OWASP
    minimum (19 MiB, 2 iterations, parallelism 1), `verify` keeps reading PBKDF2 hashes and reports
    `CorrectNeedsRehash` for them.

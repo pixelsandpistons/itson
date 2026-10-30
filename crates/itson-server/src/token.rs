@@ -20,6 +20,15 @@ impl TokenHash {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Reconstructs a stored digest without hashing it a second time.
+    pub(crate) fn from_stored(value: String) -> Option<Self> {
+        (value.len() == 64
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        .then_some(Self(value))
+    }
 }
 
 /// Makes a new token and its hash. Fails only if the random source does.

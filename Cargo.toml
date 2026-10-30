@@ -39,6 +39,8 @@ eframe = "=0.37.0"
 # Already in the approved crates' dependency tree; used directly by the voice spike.
 bytes = "=1.12.1"
 ring = "=0.17.14"
+rusqlite = { version = "=0.41.0", features = ["bundled"] }
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

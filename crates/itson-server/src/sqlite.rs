@@ -18,7 +18,10 @@ use rusqlite::{
 use std::path::Path;
 use std::time::Duration;
 
-const MIGRATIONS: &[&str] = &[include_str!("sqlite/migrations/001_initial.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("sqlite/migrations/001_initial.sql"),
+    include_str!("sqlite/migrations/002_sessions_expiry_index.sql"),
+];
 
 /// A persistent store with one SQLite connection. Only token hashes are stored.
 #[derive(Debug)]
@@ -286,6 +289,12 @@ impl Store for SqliteStore {
             [SqlU64(user.0)],
             read_session,
         )
+    }
+
+    fn delete_expired_sessions(&mut self, now: u64) -> Result<usize, StoreError> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM sessions WHERE expires_at <= ?1", [SqlU64(now)])?)
     }
 
     fn invite(&self, code: &str) -> Result<Option<Invite>, StoreError> {

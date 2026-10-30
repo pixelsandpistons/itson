@@ -7,8 +7,9 @@ every message, file and setting is stored in a folder you choose. A native deskt
 Windows connects to as many servers as you like.
 
 > **Early development.** The first server binary supports accounts and text over HTTP and WebSocket.
-> There is no desktop app or voice adapter yet. The server uses plain HTTP; configure TLS or a TLS
-> reverse proxy before exposing it. Nothing here has had a security review.
+> Setup requires a code printed at startup. There is no desktop app or voice adapter yet. The server
+> uses plain HTTP; configure TLS or a TLS reverse proxy before exposing it. Nothing here has had a
+> security review.
 
 ## Made with AI
 
@@ -33,7 +34,7 @@ The full plan, architecture and phases are in [docs/PLAN.md](docs/PLAN.md).
 
 | Piece | State |
 |---|---|
-| `itson-protocol` v0.2 | Built and tested. IDs, version negotiation, permission flags, JSON event frames with sequence numbers and resume, binary voice datagram header. |
+| `itson-protocol` v0.3 | Built and tested. IDs, version negotiation, permission flags, JSON event frames with sequence numbers and resume, binary voice datagram header. 0.3 marks required HTTP setup codes and adapter limits. |
 | `itson-domain` | Built and tested. Permission resolution with channel overwrites and timeouts, message and username rules, ID generator. |
 | `itson-server` | Runnable HTTP/WebSocket server with SQLite persistence: setup, registration, sign-in, bearer-authenticated history, message gateway with resume and presence. Core operations also include invites, roles, channels, timeouts and bans, connection housekeeping (handshake, heartbeat and revalidation timeouts, slow-reader bound) and a rate limiter the adapter does not wire yet. No TLS or QUIC voice adapter yet. |
 | `itson-client-core` | Connection state machine (handshake, heartbeat, resume, sign-out) and the local cache the UI reads: channels, presence, per-channel history with unread counts, pending sends, typing notices. |
@@ -53,8 +54,10 @@ Run the server on loopback with an explicit data directory:
 cargo run -p itson-server --locked -- --data-dir ./itson-data --listen 127.0.0.1:8080
 ```
 
-It creates `itson-data/itson.sqlite3` and reports whether setup has run. The [gateway guide](docs/GATEWAY.md)
-documents the setup/sign-in requests, bearer tokens, WebSocket exchange and current limits.
+It creates `itson-data/itson.sqlite3` and reports whether setup has run. On an unconfigured server it
+prints the setup code once; include it as `setup_code` in `POST /api/setup`. The
+[gateway guide](docs/GATEWAY.md) documents rate limits, sign-in, bearer tokens, WebSocket timeouts
+and resume. Client addresses come from the socket; forwarded-address headers are not trusted.
 
 ## Build and check
 

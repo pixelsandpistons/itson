@@ -214,6 +214,14 @@ impl Sessions {
             .unwrap_or_default()
     }
 
+    /// Whether an adapter should wake this session's socket. An overflow
+    /// also needs a wake so `Connection::tick` can report the slow reader.
+    pub fn needs_drain(&self, token_hash: &TokenHash) -> bool {
+        self.logs
+            .get(token_hash)
+            .is_some_and(|(_, log)| !log.outbox.is_empty() || log.overflowed)
+    }
+
     /// Whether a session's outbox overflowed since the last call, clearing
     /// the flag. [`Connection::tick`] checks this for its own session.
     pub fn take_overflow(&mut self, token_hash: &TokenHash) -> bool {
@@ -451,7 +459,7 @@ impl Connection {
             }
             None => vec![close(
                 ErrorCode::UnsupportedVersion,
-                "This server speaks protocol 0.1 to 0.2. Update the app or the server.",
+                "This server speaks protocol 0.1 to 0.3. Update the app or the server.",
             )],
         }
     }

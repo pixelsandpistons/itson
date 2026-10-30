@@ -21,6 +21,7 @@ struct Fixture {
 fn new_lease() -> Arc<SocketLease> {
     Arc::new(SocketLease {
         live: AtomicBool::new(true),
+        notify: Notify::new(),
     })
 }
 

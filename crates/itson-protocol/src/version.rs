@@ -12,9 +12,11 @@ pub struct ProtocolVersion {
     pub minor: u16,
 }
 
-/// The version this crate describes. 0.2 added sequence numbers and resume;
-/// a 0.1 peer simply never sees `s` or sends `resume`.
-pub const CURRENT: ProtocolVersion = ProtocolVersion { major: 0, minor: 2 };
+/// The version this crate describes. 0.2 added sequence numbers and resume.
+/// 0.3 marks adapter hardening: HTTP setup requires a startup `setup_code`,
+/// and gateway transports enforce rate and lifecycle limits. Existing gateway
+/// frame shapes remain compatible with 0.2; older peers may still negotiate.
+pub const CURRENT: ProtocolVersion = ProtocolVersion { major: 0, minor: 3 };
 /// The oldest version this crate still speaks.
 pub const OLDEST: ProtocolVersion = ProtocolVersion { major: 0, minor: 1 };
 

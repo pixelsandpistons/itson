@@ -244,6 +244,88 @@ fn sessions_roundtrip_and_conflicts(store: &mut dyn Store) -> Result<(), StoreEr
     Ok(())
 }
 
+fn expired_sessions_are_deleted_across_users(store: &mut dyn Store) -> Result<(), StoreError> {
+    assert_eq!(store.delete_expired_sessions(100)?, 0);
+    let account = account(10, "moon_moth");
+    store.insert_account(account.clone())?;
+    let before = Session {
+        expires_at_unix_ms: 99,
+        ..session("fictional-expired-before", 10)
+    };
+    let equal = Session {
+        expires_at_unix_ms: 100,
+        ..session("fictional-expired-equal", 20)
+    };
+    let after = Session {
+        expires_at_unix_ms: 101,
+        ..session("fictional-expired-after", 10)
+    };
+    let other_user = Session {
+        expires_at_unix_ms: 500,
+        ..session("fictional-expired-other-user", 20)
+    };
+    for item in [&before, &equal, &after, &other_user] {
+        store.insert_session(item.clone())?;
+    }
+    assert_eq!(store.delete_expired_sessions(100)?, 2);
+    assert_eq!(store.session(&before.token_hash)?, None);
+    assert_eq!(store.session(&equal.token_hash)?, None);
+    assert_eq!(store.session(&after.token_hash)?, Some(after.clone()));
+    assert_eq!(store.sessions_for(UserId(10))?, vec![after]);
+    assert_eq!(store.sessions_for(UserId(20))?, vec![other_user]);
+    assert_eq!(store.delete_expired_sessions(100)?, 0);
+    assert_eq!(store.delete_expired_sessions(98)?, 0);
+    assert_eq!(
+        store.delete_session(&before.token_hash),
+        Err(StoreError::NotFound)
+    );
+    assert_eq!(store.delete_expired_sessions(500)?, 2);
+    assert_eq!(store.sessions_for(UserId(10))?, vec![]);
+    assert_eq!(store.sessions_for(UserId(20))?, vec![]);
+    assert_eq!(store.account(account.id)?, Some(account.clone()));
+    assert_eq!(store.max_id()?, account.id.0);
+    Ok(())
+}
+
+fn expired_sessions_use_unsigned_timestamp_cutoffs(
+    store: &mut dyn Store,
+) -> Result<(), StoreError> {
+    let expiries = [
+        0,
+        1,
+        i64::MAX as u64,
+        (i64::MAX as u64) + 1,
+        u64::MAX - 1,
+        u64::MAX,
+    ];
+    let mut sessions = Vec::new();
+    for (index, expiry) in expiries.into_iter().enumerate() {
+        let session = Session {
+            expires_at_unix_ms: expiry,
+            ..session(&format!("fictional-expiry-boundary-{index}"), 10)
+        };
+        store.insert_session(session.clone())?;
+        sessions.push(session);
+    }
+    for (cutoff, count) in [
+        (0, 1),
+        (i64::MAX as u64, 2),
+        ((i64::MAX as u64) + 1, 1),
+        (u64::MAX - 1, 1),
+        (u64::MAX, 1),
+    ] {
+        assert_eq!(store.delete_expired_sessions(cutoff)?, count);
+        for session in &sessions {
+            let expected = (session.expires_at_unix_ms > cutoff).then(|| session.clone());
+            assert_eq!(store.session(&session.token_hash)?, expected);
+        }
+        assert_eq!(store.delete_expired_sessions(cutoff)?, 0);
+    }
+    assert_eq!(store.sessions_for(UserId(10))?, vec![]);
+    assert_eq!(store.max_id()?, 0);
+    Ok(())
+}
+
 fn invites_roundtrip_and_conflicts(store: &mut dyn Store) -> Result<(), StoreError> {
     let original = invite("fictional-moon-code");
     store.insert_invite(original.clone())?;
@@ -495,6 +577,8 @@ conformance!(memory, MemoryStore::new();
     settings_roundtrip,
     accounts_roundtrip_and_conflicts,
     sessions_roundtrip_and_conflicts,
+    expired_sessions_are_deleted_across_users,
+    expired_sessions_use_unsigned_timestamp_cutoffs,
     invites_roundtrip_and_conflicts,
     roles_roundtrip_and_conflicts,
     channels_roundtrip_and_conflicts,
@@ -510,6 +594,8 @@ conformance!(sqlite, SqliteStore::open_in_memory()?;
     settings_roundtrip,
     accounts_roundtrip_and_conflicts,
     sessions_roundtrip_and_conflicts,
+    expired_sessions_are_deleted_across_users,
+    expired_sessions_use_unsigned_timestamp_cutoffs,
     invites_roundtrip_and_conflicts,
     roles_roundtrip_and_conflicts,
     channels_roundtrip_and_conflicts,

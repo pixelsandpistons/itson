@@ -23,7 +23,7 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
 
 - `crates/itson-protocol`: wire types. JSON frames `{"s": seq, "op": "...", "d": {...}}` over a
   WebSocket; a 12-byte binary header plus Opus packet for voice datagrams; 53-bit time-ordered IDs;
-  permission bitflags; version negotiation (current 0.2, oldest 0.1). Module docs in `frame.rs` and
+  permission bitflags; version negotiation (current 0.3, oldest 0.1). Module docs in `frame.rs` and
   `voice.rs` are the protocol description.
 - `crates/itson-domain`: permission resolution (owner, administrator, roles, channel overwrites in
   everyone/roles/member layers, timeouts), message and username normalisation, ID generator.
@@ -35,7 +35,10 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
   (`Server<S: Store>`); `gateway.rs` is the per-connection state machine (`Connection`) and the
   per-session event log with outbox (`Sessions`) that makes `resume` work, plus presence, and
   `Connection::tick` for handshake, heartbeat, revalidation and slow-reader timeouts; `limits.rs` is
-  a dependency-free token-bucket `RateLimiter`. `http.rs` provides the
+  a dependency-free token-bucket `RateLimiter`. The adapter drives tick, notifies session owners
+  instead of polling outboxes, and limits requests by socket peer IP, sign-in name and connection.
+  Sign-in verification runs on a bounded blocking pool; a startup setup code protects the owner
+  account. Migration 002 adds the expiry index for startup/hourly session deletion. `http.rs` provides the
   axum HTTP/WebSocket adapter and dedicated database worker; `main.rs` runs it with `--data-dir` and
   `--listen`. See [GATEWAY.md](GATEWAY.md). No TLS or QUIC voice adapter yet.
 - `crates/itson-client-core`: `ClientConnection`, the client's handshake/heartbeat/resume state
@@ -69,26 +72,21 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
 ## Open tasks, in priority order
 
 Done so far: SQLite store, HTTP/WebSocket adapter and `itson-server` binary, presence, connection
-housekeeping, rate limiter (core only), client cache. Each task below is self-contained.
+housekeeping, adapter hardening, wired rate limits, client cache. Each task below is self-contained.
 
-1. **Adapter hardening.** Call `Connection::tick` on the timer; replace the 25 ms drain poll with a
-   per-session `Notify`; wire `RateLimiter` by address, username and connection (429 with
-   `Retry-After`, or a `rate_limited` close); verify passwords on `spawn_blocking` instead of the
-   database thread; require a one-time setup code printed at startup; add
-   `Store::delete_expired_sessions(now)` with a migration and an hourly sweep; cache the server name.
-2. **Argon2id.** Add the `argon2` crate behind `password.rs`: new hashes use argon2id at the OWASP
+1. **Argon2id.** Add the `argon2` crate behind `password.rs`: new hashes use argon2id at the OWASP
    minimum (19 MiB, 2 iterations, parallelism 1); `verify` keeps reading PBKDF2 hashes and reports
    `CorrectNeedsRehash` for them.
-3. **Reactions and read markers.** Store methods (migration), `ADD_REACTIONS` checks, events, and
+2. **Reactions and read markers.** Store methods (migration), `ADD_REACTIONS` checks, events, and
    `MarkRead` persisted so unread counts survive a restart.
-4. **Headless CLI (`itson-cli`).** Sign in, join the gateway, print events, send a message, resume
+3. **Headless CLI (`itson-cli`).** Sign in, join the gateway, print events, send a message, resume
    after a dropped socket. This becomes the integration test driver for the server.
-5. **TLS.** Serve HTTPS directly with rustls (already in the workspace): a real certificate when
+4. **TLS.** Serve HTTPS directly with rustls (already in the workspace): a real certificate when
    given, otherwise a self-signed one with its fingerprint printed, as the voice spike does. Propose
    the approach before building.
-6. **Property tests** with `proptest` for the jitter buffer and permission resolution.
-7. **Fuzz targets** (`cargo-fuzz`) for `VoicePacket::decode` and `ClientFrame` JSON decoding.
-8. **Threat model document** at `docs/THREAT-MODEL.md` following the headings in `docs/PLAN.md`
+5. **Property tests** with `proptest` for the jitter buffer and permission resolution.
+6. **Fuzz targets** (`cargo-fuzz`) for `VoicePacket::decode` and `ClientFrame` JSON decoding.
+7. **Threat model document** at `docs/THREAT-MODEL.md` following the headings in `docs/PLAN.md`
    under "Security and abuse".
 
 ## How to work with the maintainer

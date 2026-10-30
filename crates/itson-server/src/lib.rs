@@ -16,6 +16,7 @@
 
 pub mod gateway;
 pub mod http;
+pub mod limits;
 pub mod password;
 pub mod service;
 pub mod sqlite;

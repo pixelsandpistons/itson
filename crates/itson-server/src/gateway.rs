@@ -22,6 +22,17 @@ use std::collections::{HashMap, VecDeque};
 /// Events kept per session for replay. At a busy 10 events a second this is
 /// about 50 seconds.
 pub const REPLAY_CAPACITY: usize = 512;
+/// Undelivered events a session may queue before it is considered too slow.
+/// Equal to the replay capacity, so a client closed for slowness can still
+/// `resume` straight away.
+pub const OUTBOX_CAPACITY: usize = REPLAY_CAPACITY;
+/// A connection must finish `hello` and `authenticate` within this long.
+pub const HANDSHAKE_TIMEOUT_MS: u64 = 10_000;
+/// A ready connection is closed when no frame arrives for this long: two
+/// missed heartbeats plus slack.
+pub const IDLE_TIMEOUT_MS: u64 = HEARTBEAT_INTERVAL_MS as u64 * 2 + 15_000;
+/// How often a ready connection re-checks that its session still exists.
+pub const REVALIDATE_INTERVAL_MS: u64 = 60_000;
 
 /// What the socket adapter must do after a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,6 +52,9 @@ pub struct EventLog {
     next_seq: u64,
     recent: VecDeque<(u64, ServerFrame)>,
     outbox: VecDeque<ServerEnvelope>,
+    /// The outbox hit [`OUTBOX_CAPACITY`] and was dropped; the client must
+    /// be told and may resume from the replay log.
+    overflowed: bool,
 }
 
 impl EventLog {
@@ -52,7 +66,13 @@ impl EventLog {
             self.recent.pop_front();
         }
         self.recent.push_back((seq, frame.clone()));
-        self.outbox.push_back(ServerEnvelope::event(seq, frame));
+        if self.outbox.len() >= OUTBOX_CAPACITY {
+            self.outbox.clear();
+            self.overflowed = true;
+        }
+        if !self.overflowed {
+            self.outbox.push_back(ServerEnvelope::event(seq, frame));
+        }
         seq
     }
 
@@ -194,6 +214,14 @@ impl Sessions {
             .unwrap_or_default()
     }
 
+    /// Whether a session's outbox overflowed since the last call, clearing
+    /// the flag. [`Connection::tick`] checks this for its own session.
+    pub fn take_overflow(&mut self, token_hash: &TokenHash) -> bool {
+        self.logs
+            .get_mut(token_hash)
+            .is_some_and(|(_, log)| std::mem::take(&mut log.overflowed))
+    }
+
     pub fn len(&self) -> usize {
         self.logs.len()
     }
@@ -215,13 +243,75 @@ enum State {
 pub struct Connection {
     state: State,
     server_name: String,
+    /// When the socket opened, or the last client frame arrived.
+    last_activity: u64,
+    /// When the session was last confirmed to exist.
+    last_revalidated: u64,
 }
 
 impl Connection {
+    /// A connection whose opening time is unknown. The first [`tick`](Self::tick)
+    /// or frame starts its clocks. Prefer [`opened`](Self::opened).
     pub fn new(server_name: &str) -> Self {
+        Self::opened(server_name, 0)
+    }
+
+    /// `now` is Unix milliseconds at which the socket opened.
+    pub fn opened(server_name: &str, now: u64) -> Self {
         Connection {
             state: State::AwaitingHello,
             server_name: server_name.to_owned(),
+            last_activity: now,
+            last_revalidated: now,
+        }
+    }
+
+    /// Housekeeping the adapter runs on a timer, about once a second.
+    /// Returns a close when the handshake stalled, the client went quiet,
+    /// its session was revoked, or it fell too far behind on events.
+    pub fn tick<S: Store>(
+        &mut self,
+        server: &Server<S>,
+        sessions: &mut Sessions,
+        now: u64,
+    ) -> Vec<Output> {
+        if self.last_activity == 0 {
+            self.last_activity = now;
+            self.last_revalidated = now;
+            return Vec::new();
+        }
+        let idle = now.saturating_sub(self.last_activity);
+        match &self.state {
+            State::AwaitingHello | State::AwaitingAuth { .. } => {
+                if idle > HANDSHAKE_TIMEOUT_MS {
+                    return vec![close(
+                        ErrorCode::NotAuthenticated,
+                        "The connection did not sign in in time.",
+                    )];
+                }
+                Vec::new()
+            }
+            State::Ready { token_hash, .. } => {
+                if idle > IDLE_TIMEOUT_MS {
+                    return vec![close(
+                        ErrorCode::HeartbeatTimeout,
+                        "No heartbeat arrived in time.",
+                    )];
+                }
+                if sessions.take_overflow(token_hash) {
+                    return vec![close(
+                        ErrorCode::TooSlow,
+                        "Events piled up faster than this connection read them. Reconnect and resume.",
+                    )];
+                }
+                if now.saturating_sub(self.last_revalidated) >= REVALIDATE_INTERVAL_MS {
+                    self.last_revalidated = now;
+                    if let Err(e) = server.session_user(token_hash, now) {
+                        return vec![close(e.code(), &e.to_string())];
+                    }
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -250,6 +340,7 @@ impl Connection {
         sessions: &mut Sessions,
         now: u64,
     ) -> Vec<Output> {
+        self.last_activity = now;
         let user = match (&self.state, frame) {
             (State::AwaitingHello, ClientFrame::Hello { versions, .. }) => {
                 return self.hello(versions);
@@ -400,6 +491,7 @@ impl Connection {
             );
         }
         let presences = sessions.presences();
+        self.last_revalidated = now;
         self.state = State::Ready {
             user: user.clone(),
             token_hash,
@@ -439,6 +531,8 @@ impl Connection {
         };
         // Anything still queued was never delivered; replay covers it.
         log.outbox.clear();
+        log.overflowed = false;
+        self.last_revalidated = now;
         self.state = State::Ready { user, token_hash };
         std::iter::once(reply(ServerFrame::Resumed {
             replayed: missed.len() as u64,

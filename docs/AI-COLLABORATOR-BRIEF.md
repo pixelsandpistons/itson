@@ -33,10 +33,13 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
   `password.rs` hashes with PBKDF2-HMAC-SHA256 in a self-describing format; `token.rs` makes session
   tokens and stores only their SHA-256; `service.rs` is every operation with permission checks
   (`Server<S: Store>`); `gateway.rs` is the per-connection state machine (`Connection`) and the
-  per-session event log with outbox (`Sessions`) that makes `resume` work. `http.rs` provides the
+  per-session event log with outbox (`Sessions`) that makes `resume` work, plus presence, and
+  `Connection::tick` for handshake, heartbeat, revalidation and slow-reader timeouts; `limits.rs` is
+  a dependency-free token-bucket `RateLimiter`. `http.rs` provides the
   axum HTTP/WebSocket adapter and dedicated database worker; `main.rs` runs it with `--data-dir` and
   `--listen`. See [GATEWAY.md](GATEWAY.md). No TLS or QUIC voice adapter yet.
-- `crates/itson-client-core`: `ClientConnection`, the client's handshake/heartbeat/resume state machine.
+- `crates/itson-client-core`: `ClientConnection`, the client's handshake/heartbeat/resume state
+  machine, and `Cache`, the local state the UI reads (channels, presence, history, unread, typing).
 - `crates/itson-voice`: a jitter buffer with FEC-aware loss reporting.
 - `spikes/`: Phase 0 experiments (Opus over QUIC with certificate pinning; message lists in iced and
   egui). Throwaway code, do not build on it.
@@ -63,26 +66,27 @@ Cargo workspace, Rust 1.95 or newer, edition 2024. Everything below has tests th
    no telemetry, no third-party calls, no feature needing a member's location or real identity.
 10. Deliver as a pull request with a short description of what changed and how you checked it.
 
-## Good first tasks, in priority order
+## Open tasks, in priority order
 
-Each is self-contained and does not collide with the others.
+Done so far: SQLite store, HTTP/WebSocket adapter and `itson-server` binary, presence, connection
+housekeeping, rate limiter (core only), client cache. Each task below is self-contained.
 
-1. **SQLite `Store` (implemented).** `SqliteStore` uses `rusqlite` =0.41.0 (bundled SQLite, WAL),
-   versioned migrations and shared conformance tests with `MemoryStore`. See [STORAGE.md](STORAGE.md).
-2. **HTTP and WebSocket adapter (implemented).** `axum` =0.8.9 serves setup, registration, sign-in,
-   history and the gateway. A dedicated worker owns `Server<SqliteStore>`; sockets drive `Connection`,
-   drain outboxes every 25 ms and retain disconnected gateway sessions for 60 seconds. The first
-   `itson-server` binary accepts `--data-dir` and `--listen`. See [GATEWAY.md](GATEWAY.md).
-3. **Argon2id.** Add the `argon2` crate behind `password.rs`: new hashes use argon2id at the OWASP
-   minimum (19 MiB, 2 iterations, parallelism 1), `verify` keeps reading PBKDF2 hashes and reports
+1. **Adapter hardening.** Call `Connection::tick` on the timer; replace the 25 ms drain poll with a
+   per-session `Notify`; wire `RateLimiter` by address, username and connection (429 with
+   `Retry-After`, or a `rate_limited` close); verify passwords on `spawn_blocking` instead of the
+   database thread; require a one-time setup code printed at startup; add
+   `Store::delete_expired_sessions(now)` with a migration and an hourly sweep; cache the server name.
+2. **Argon2id.** Add the `argon2` crate behind `password.rs`: new hashes use argon2id at the OWASP
+   minimum (19 MiB, 2 iterations, parallelism 1); `verify` keeps reading PBKDF2 hashes and reports
    `CorrectNeedsRehash` for them.
+3. **Reactions and read markers.** Store methods (migration), `ADD_REACTIONS` checks, events, and
+   `MarkRead` persisted so unread counts survive a restart.
 4. **Headless CLI (`itson-cli`).** Sign in, join the gateway, print events, send a message, resume
    after a dropped socket. This becomes the integration test driver for the server.
-5. **Reactions, read markers and presence** in `service.rs` and `gateway.rs`, which currently answer
-   `not_found` for those frames. Add store methods, permission checks (`ADD_REACTIONS`) and events.
-6. **Property tests** with `proptest` for the jitter buffer (any sequence of pushes and pops never
-   panics, plays each sequence at most once, never plays out of order) and for permission resolution
-   (owner and administrator always get everything; `VIEW_CHANNEL` denied means empty).
+5. **TLS.** Serve HTTPS directly with rustls (already in the workspace): a real certificate when
+   given, otherwise a self-signed one with its fingerprint printed, as the voice spike does. Propose
+   the approach before building.
+6. **Property tests** with `proptest` for the jitter buffer and permission resolution.
 7. **Fuzz targets** (`cargo-fuzz`) for `VoicePacket::decode` and `ClientFrame` JSON decoding.
 8. **Threat model document** at `docs/THREAT-MODEL.md` following the headings in `docs/PLAN.md`
    under "Security and abuse".

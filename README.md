@@ -35,8 +35,8 @@ The full plan, architecture and phases are in [docs/PLAN.md](docs/PLAN.md).
 |---|---|
 | `itson-protocol` v0.2 | Built and tested. IDs, version negotiation, permission flags, JSON event frames with sequence numbers and resume, binary voice datagram header. |
 | `itson-domain` | Built and tested. Permission resolution with channel overwrites and timeouts, message and username rules, ID generator. |
-| `itson-server` | Runnable HTTP/WebSocket server with SQLite persistence: setup, registration, sign-in, bearer-authenticated history, message gateway and resume. Core operations also include invites, roles, channels, timeouts and bans. No TLS or QUIC voice adapter yet. |
-| `itson-client-core` | Connection state machine built and tested: handshake, heartbeat, resume, sign-out handling. |
+| `itson-server` | Runnable HTTP/WebSocket server with SQLite persistence: setup, registration, sign-in, bearer-authenticated history, message gateway with resume and presence. Core operations also include invites, roles, channels, timeouts and bans, connection housekeeping (handshake, heartbeat and revalidation timeouts, slow-reader bound) and a rate limiter the adapter does not wire yet. No TLS or QUIC voice adapter yet. |
+| `itson-client-core` | Connection state machine (handshake, heartbeat, resume, sign-out) and the local cache the UI reads: channels, presence, per-channel history with unread counts, pending sends, typing notices. |
 | `itson-voice` | Jitter buffer built and tested. |
 | Voice-over-QUIC spike | Works on loopback, including loss recovery and certificate pinning. Internet and microphone tests are pending. |
 | GUI toolkit spikes (iced, egui) | Build on Linux. Not yet measured. |
@@ -44,7 +44,8 @@ The full plan, architecture and phases are in [docs/PLAN.md](docs/PLAN.md).
 
 Phase 0 evidence and open items are in [PHASE0.md](PHASE0.md). Phase 1 has started with the
 server's core, [SQLite store](docs/STORAGE.md), and [HTTP/WebSocket adapter](docs/GATEWAY.md).
-The next steps include Argon2id and the headless CLI.
+The next steps are adapter hardening (rate limits, setup code, hashing off the database thread),
+Argon2id, reactions and read markers, and the headless CLI.
 
 Run the server on loopback with an explicit data directory:
 

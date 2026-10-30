@@ -205,6 +205,12 @@ pub enum ErrorCode {
     InvalidToken,
     /// The gateway session is gone or the gap is too large to replay.
     CannotResume,
+    /// No heartbeat or other frame arrived in time. Added in 0.2 without a
+    /// version bump; older clients read it as `unknown`.
+    HeartbeatTimeout,
+    /// The client did not read events fast enough and its queue was dropped.
+    /// Reconnect and `resume`.
+    TooSlow,
     Forbidden,
     NotFound,
     InvalidContent,

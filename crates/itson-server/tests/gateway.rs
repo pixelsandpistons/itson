@@ -7,7 +7,10 @@ use itson_protocol::frame::{ClientFrame, ErrorCode, ServerFrame};
 use itson_protocol::model::{ChannelKind, Presence};
 use itson_protocol::version::{ProtocolVersion, VersionRange};
 use itson_protocol::{ChannelId, MessageId, Permissions, RoleId, SessionToken, UserId};
-use itson_server::gateway::{Connection, Output, Sessions};
+use itson_server::gateway::{
+    Connection, HANDSHAKE_TIMEOUT_MS, IDLE_TIMEOUT_MS, OUTBOX_CAPACITY, Output,
+    REVALIDATE_INTERVAL_MS, Sessions,
+};
 use itson_server::password::Cost;
 use itson_server::service::{Event, Server, ServiceError};
 use itson_server::store::MemoryStore;
@@ -45,7 +48,7 @@ fn world() -> World {
 
 fn sign_in(w: &mut World, username: &str, password: &str) -> (Connection, SessionToken) {
     let (token, _) = w.server.sign_in(username, password, "test", T0).unwrap();
-    let mut conn = Connection::new("Rental Counter");
+    let mut conn = Connection::opened("Rental Counter", T0);
     let out = conn.handle(
         ClientFrame::Hello {
             client: "test/0".into(),
@@ -86,7 +89,7 @@ fn sent(outputs: &[Output]) -> Vec<&ServerFrame> {
 #[test]
 fn frames_before_hello_or_authenticate_close_the_connection() {
     let mut w = world();
-    let mut conn = Connection::new("x");
+    let mut conn = Connection::opened("x", T0);
     let out = conn.handle(
         ClientFrame::Heartbeat { seq: 1 },
         &mut w.server,
@@ -101,7 +104,7 @@ fn frames_before_hello_or_authenticate_close_the_connection() {
         }
     ));
 
-    let mut conn = Connection::new("x");
+    let mut conn = Connection::opened("x", T0);
     conn.handle(
         ClientFrame::Hello {
             client: "t".into(),
@@ -125,7 +128,7 @@ fn frames_before_hello_or_authenticate_close_the_connection() {
         }
     ));
 
-    let mut conn = Connection::new("x");
+    let mut conn = Connection::opened("x", T0);
     let out = conn.handle(
         ClientFrame::Hello {
             client: "t".into(),
@@ -150,7 +153,7 @@ fn frames_before_hello_or_authenticate_close_the_connection() {
 #[test]
 fn a_bad_token_closes_with_invalid_token() {
     let mut w = world();
-    let mut conn = Connection::new("x");
+    let mut conn = Connection::opened("x", T0);
     conn.handle(
         ClientFrame::Hello {
             client: "t".into(),
@@ -463,7 +466,7 @@ fn resume_replays_missed_events_and_refuses_impossible_gaps() {
         );
     }
 
-    let mut again = Connection::new("Rental Counter");
+    let mut again = Connection::opened("Rental Counter", T0);
     again.handle(
         ClientFrame::Hello {
             client: "t".into(),
@@ -500,7 +503,7 @@ fn resume_replays_missed_events_and_refuses_impossible_gaps() {
     assert!(again.user().is_some());
 
     // Claiming to be ahead of the server is refused.
-    let mut liar = Connection::new("Rental Counter");
+    let mut liar = Connection::opened("Rental Counter", T0);
     liar.handle(
         ClientFrame::Hello {
             client: "t".into(),
@@ -529,7 +532,7 @@ fn resume_replays_missed_events_and_refuses_impossible_gaps() {
 
     // A closed session cannot be resumed.
     w.sessions.close(&TokenHash::of(&cc_token));
-    let mut gone = Connection::new("Rental Counter");
+    let mut gone = Connection::opened("Rental Counter", T0);
     gone.handle(
         ClientFrame::Hello {
             client: "t".into(),
@@ -626,4 +629,176 @@ fn presence_is_announced_on_sign_in_change_and_last_disconnect() {
         matches!(seen.as_slice(), [e] if e.frame == ServerFrame::PresenceUpdated { user: member, presence: Presence::Offline })
     );
     assert_eq!(w.sessions.presence_of(member), Presence::Offline);
+}
+
+#[test]
+fn tick_closes_stalled_handshakes_and_quiet_connections() {
+    let mut w = world();
+    let mut fresh = Connection::opened("Rental Counter", T0);
+    assert!(
+        fresh
+            .tick(&w.server, &mut w.sessions, T0 + HANDSHAKE_TIMEOUT_MS)
+            .is_empty()
+    );
+    let out = fresh.tick(&w.server, &mut w.sessions, T0 + HANDSHAKE_TIMEOUT_MS + 1);
+    assert!(matches!(
+        out[0],
+        Output::Close {
+            code: ErrorCode::NotAuthenticated,
+            ..
+        }
+    ));
+
+    let (mut dan, _) = sign_in(&mut w, "dan", "late-fees-forever");
+    assert!(
+        dan.tick(&w.server, &mut w.sessions, T0 + IDLE_TIMEOUT_MS)
+            .is_empty()
+    );
+    // A heartbeat counts as activity.
+    dan.handle(
+        ClientFrame::Heartbeat { seq: 1 },
+        &mut w.server,
+        &mut w.sessions,
+        T0 + 1_000,
+    );
+    assert!(
+        dan.tick(&w.server, &mut w.sessions, T0 + IDLE_TIMEOUT_MS + 500)
+            .is_empty()
+    );
+    let out = dan.tick(&w.server, &mut w.sessions, T0 + 1_000 + IDLE_TIMEOUT_MS + 1);
+    assert!(matches!(
+        out[0],
+        Output::Close {
+            code: ErrorCode::HeartbeatTimeout,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn tick_revalidates_the_session_and_closes_revoked_ones() {
+    let mut w = world();
+    let (mut cc, _cc_token) = sign_in(&mut w, "couch_coop", "two-player-mode");
+    let owner = w.owner;
+    // Before the interval nothing is checked, even after a ban.
+    w.server.ban(owner, w.member, T0 + 1).unwrap();
+    assert!(
+        cc.tick(&w.server, &mut w.sessions, T0 + REVALIDATE_INTERVAL_MS - 1)
+            .is_empty()
+    );
+    let out = cc.tick(&w.server, &mut w.sessions, T0 + REVALIDATE_INTERVAL_MS);
+    assert!(
+        matches!(
+            out[0],
+            Output::Close {
+                code: ErrorCode::InvalidToken,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
+
+    // A healthy session passes revalidation and keeps going.
+    let (mut dan, _) = sign_in(&mut w, "dan", "late-fees-forever");
+    assert!(
+        dan.tick(&w.server, &mut w.sessions, T0 + REVALIDATE_INTERVAL_MS)
+            .is_empty()
+    );
+    // Heartbeats keep it alive; the second revalidation then passes too.
+    dan.handle(
+        ClientFrame::Heartbeat { seq: 1 },
+        &mut w.server,
+        &mut w.sessions,
+        T0 + 2 * REVALIDATE_INTERVAL_MS - 1_000,
+    );
+    assert!(
+        dan.tick(&w.server, &mut w.sessions, T0 + 2 * REVALIDATE_INTERVAL_MS)
+            .is_empty()
+    );
+}
+
+#[test]
+fn a_slow_reader_is_told_and_can_still_resume() {
+    let mut w = world();
+    let (mut cc, cc_token) = sign_in(&mut w, "couch_coop", "two-player-mode");
+    let (owner, member, general) = (w.owner, w.member, w.general);
+    for i in 0..=OUTBOX_CAPACITY as u64 {
+        let Event::MessageCreated(m) = w
+            .server
+            .send_message(owner, general, &format!("{i}"), None, T0 + i)
+            .unwrap()
+        else {
+            panic!()
+        };
+        w.sessions.publish(
+            &[member],
+            &ServerFrame::MessageCreated {
+                message: m,
+                nonce: None,
+            },
+            None,
+        );
+    }
+    let out = cc.tick(&w.server, &mut w.sessions, T0 + 1_000);
+    assert!(
+        matches!(
+            out[0],
+            Output::Close {
+                code: ErrorCode::TooSlow,
+                ..
+            }
+        ),
+        "{out:?}"
+    );
+    // The queue was dropped, but the replay log still covers the gap.
+    assert!(w.sessions.drain(&TokenHash::of(&cc_token)).is_empty());
+    let mut again = Connection::opened("Rental Counter", T0 + 2_000);
+    again.handle(
+        ClientFrame::Hello {
+            client: "t".into(),
+            versions: VersionRange::SUPPORTED,
+        },
+        &mut w.server,
+        &mut w.sessions,
+        T0 + 2_000,
+    );
+    let out = again.handle(
+        ClientFrame::Resume {
+            token: cc_token.clone(),
+            last_seq: 1,
+        },
+        &mut w.server,
+        &mut w.sessions,
+        T0 + 2_000,
+    );
+    assert!(
+        matches!(sent(&out)[0], ServerFrame::Resumed { replayed } if *replayed as usize == OUTBOX_CAPACITY),
+        "{:?}",
+        sent(&out)[0]
+    );
+    assert!(
+        again
+            .tick(&w.server, &mut w.sessions, T0 + 2_500)
+            .is_empty(),
+        "the overflow flag is cleared by resume"
+    );
+}
+
+#[test]
+fn a_connection_without_an_opening_time_starts_its_clock_on_first_tick() {
+    let mut w = world();
+    let mut conn = Connection::new("Rental Counter");
+    assert!(conn.tick(&w.server, &mut w.sessions, T0).is_empty());
+    assert!(
+        conn.tick(&w.server, &mut w.sessions, T0 + HANDSHAKE_TIMEOUT_MS)
+            .is_empty()
+    );
+    let out = conn.tick(&w.server, &mut w.sessions, T0 + HANDSHAKE_TIMEOUT_MS + 1);
+    assert!(matches!(
+        out[0],
+        Output::Close {
+            code: ErrorCode::NotAuthenticated,
+            ..
+        }
+    ));
 }

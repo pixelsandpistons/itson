@@ -305,10 +305,15 @@ impl<S: Store> Server<S> {
 
     /// Resolves a session token to its member, or `InvalidSession`.
     pub fn authenticate(&self, token: &SessionToken, now: u64) -> Result<User, ServiceError> {
-        let hash = TokenHash::of(token);
+        self.session_user(&TokenHash::of(token), now)
+    }
+
+    /// Same as [`authenticate`](Self::authenticate) for a stored token hash,
+    /// used to re-check a connection that authenticated earlier.
+    pub fn session_user(&self, hash: &TokenHash, now: u64) -> Result<User, ServiceError> {
         let session = self
             .store
-            .session(&hash)?
+            .session(hash)?
             .ok_or(ServiceError::InvalidSession)?;
         if now >= session.expires_at_unix_ms {
             return Err(ServiceError::InvalidSession);

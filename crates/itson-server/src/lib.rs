@@ -14,6 +14,7 @@
 //!   log that makes `resume` possible.
 
 pub mod gateway;
+pub mod limits;
 pub mod password;
 pub mod service;
 pub mod store;
